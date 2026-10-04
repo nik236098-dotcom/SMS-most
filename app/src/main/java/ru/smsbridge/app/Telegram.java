@@ -40,7 +40,7 @@ final class Telegram {
     void send(long chat,String text,JSONObject keyboard) throws Exception {
         java.util.List<String> parts=Rules.chunks(text);
         for(int i=0;i<parts.size();i++) {
-            JSONObject p=new JSONObject().put("chat_id",chat).put("text",parts.get(i)).put("protect_content",true);
+            JSONObject p=new JSONObject().put("chat_id",chat).put("text",parts.get(i)).put("protect_content",false);
             if(i==parts.size()-1 && keyboard!=null) p.put("reply_markup",keyboard);
             call("sendMessage",p);
         }

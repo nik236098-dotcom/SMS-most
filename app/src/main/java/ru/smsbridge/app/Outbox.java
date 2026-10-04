@@ -23,7 +23,7 @@ final class Outbox {
                     for(int i=p.getInt("part");i<chunks.size();i++) {
                         if(!s.enabled() || !epoch.equals(s.epoch()) || !s.pending(id))return;
                         String text=chunks.get(i)+(chunks.size()>1?"\n[SMS #"+id+" · часть "+(i+1)+"/"+chunks.size()+"]":"");
-                        t.call("sendMessage",new JSONObject().put("chat_id",destination).put("text",text).put("protect_content",true));s.progress(id,i+1);
+                        t.call("sendMessage",new JSONObject().put("chat_id",destination).put("text",text).put("protect_content",false));s.progress(id,i+1);
                     }s.delivered(id);
                 } catch(Exception e) {
                     boolean blocked=e instanceof Telegram.ApiError && (((Telegram.ApiError)e).code==403 || ((Telegram.ApiError)e).code==400);
