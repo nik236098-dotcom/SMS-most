@@ -16,6 +16,15 @@ public final class Rules {
         if(value>4503599627370495L)throw new IllegalArgumentException("Проверь Telegram ID: число слишком большое");
         return value;
     }
+    public static List<Long> telegramIds(String text) {
+        java.util.LinkedHashSet<Long> unique=new java.util.LinkedHashSet<>();
+        if(text!=null && !text.trim().isEmpty())for(String part:text.trim().split("[,;\\s]+"))unique.add(telegramId(part));
+        if(unique.size()>10)throw new IllegalArgumentException("Можно указать до 10 Telegram ID");
+        return new ArrayList<>(unique);
+    }
+    public static String joinIds(List<Long> ids) {
+        StringBuilder out=new StringBuilder();for(long id:ids){if(out.length()>0)out.append(", ");out.append(id);}return out.toString();
+    }
     public static String phone(String value) {
         String p = value == null ? "" : value.replaceAll("[\\s()\\-]", "");
         if (!p.matches("\\+[1-9][0-9]{6,14}")) throw new IllegalArgumentException("Введите номер с кодом страны, например +79991234567");
@@ -60,5 +69,8 @@ public final class Rules {
     }
     public static boolean authorized(long configuredChat, long chat, String type, boolean isBot) {
         return configuredChat > 0 && configuredChat == chat && "private".equals(type) && !isBot;
+    }
+    public static boolean authorized(List<Long> ids, long chat, String type, boolean isBot) {
+        return chat>0 && ids.contains(chat) && "private".equals(type) && !isBot;
     }
 }

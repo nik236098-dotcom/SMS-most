@@ -10,15 +10,23 @@ import org.json.JSONObject;
 import java.util.UUID;
 
 final class Store extends SQLiteOpenHelper {
-    Store(Context c) { super(c, "bridge.db", null, 1); }
+    Store(Context c) { super(c, "bridge.db", null, 2); }
     @Override public void onCreate(SQLiteDatabase db) {
         db.execSQL("CREATE TABLE settings (k TEXT PRIMARY KEY, v TEXT NOT NULL)");
-        db.execSQL("CREATE TABLE outbox (id INTEGER PRIMARY KEY AUTOINCREMENT, fingerprint TEXT UNIQUE, payload TEXT NOT NULL, created INTEGER NOT NULL, state TEXT NOT NULL DEFAULT 'pending', part INTEGER NOT NULL DEFAULT 0, attempts INTEGER NOT NULL DEFAULT 0, next_try INTEGER NOT NULL DEFAULT 0, error TEXT NOT NULL DEFAULT '', delivered INTEGER NOT NULL DEFAULT 0)");
+        db.execSQL("CREATE TABLE outbox (id INTEGER PRIMARY KEY AUTOINCREMENT, fingerprint TEXT UNIQUE, payload TEXT NOT NULL, created INTEGER NOT NULL, state TEXT NOT NULL DEFAULT 'pending', part INTEGER NOT NULL DEFAULT 0, attempts INTEGER NOT NULL DEFAULT 0, next_try INTEGER NOT NULL DEFAULT 0, error TEXT NOT NULL DEFAULT '', delivered INTEGER NOT NULL DEFAULT 0, route TEXT NOT NULL DEFAULT '')");
         db.execSQL("CREATE TABLE numbers (profile TEXT PRIMARY KEY, number TEXT NOT NULL)");
         db.execSQL("CREATE TABLE active (slot INTEGER PRIMARY KEY, profile TEXT NOT NULL, observed INTEGER NOT NULL)");
         db.execSQL("CREATE TABLE operations (id INTEGER PRIMARY KEY, state TEXT NOT NULL, updated INTEGER NOT NULL)");
     }
-    @Override public void onUpgrade(SQLiteDatabase db, int oldVersion, int newVersion) { throw new IllegalStateException("Unsupported database version"); }
+    @Override public void onUpgrade(SQLiteDatabase db, int oldVersion, int newVersion) {
+        if(oldVersion==1 && newVersion==2) {db.execSQL("ALTER TABLE outbox ADD COLUMN route TEXT NOT NULL DEFAULT ''");
+            String previousEpoch="",previousChat="0";
+            try(Cursor c=db.rawQuery("SELECT k,v FROM settings WHERE k IN ('epoch','chat')",null)){
+                while(c.moveToNext())try{if(c.getString(0).equals("epoch"))previousEpoch=Crypto.open(c.getString(1));else previousChat=Crypto.open(c.getString(1));}catch(Exception e){throw new IllegalStateException("Не удалось обновить очередь",e);}
+            }
+            ContentValues cv=new ContentValues();cv.put("route",previousChat.equals("0")?"unclaimed":Rules.hash(previousEpoch+"|"+previousChat));db.update("outbox",cv,null,null);return;}
+        throw new IllegalStateException("Unsupported database version");
+    }
     synchronized String get(String k, String fallback) {
         try (Cursor c = getReadableDatabase().rawQuery("SELECT v FROM settings WHERE k=?", new String[]{k})) {
             return c.moveToFirst() ? Crypto.open(c.getString(0)) : fallback;
@@ -32,19 +40,28 @@ final class Store extends SQLiteOpenHelper {
     synchronized boolean enabled() { return get("enabled", "false").equals("true"); }
     synchronized boolean running() { return get("bot_enabled", get("enabled", "false")).equals("true") && !get("token", "").isEmpty(); }
     synchronized long chat() { return Long.parseLong(get("chat", "0")); }
+    synchronized java.util.List<Long> chats() {
+        return Rules.telegramIds(get("chat_ids",chat()>0?""+chat():""));
+    }
+    private String route(long chat) {return chat==0?"unclaimed":Rules.hash(epoch()+"|"+chat);}
     synchronized String epoch() { return get("epoch", ""); }
-    synchronized void configureBot(String token, String username, long recipient) {
-        if(recipient<0 || recipient>4503599627370495L)throw new IllegalArgumentException("Неверный Telegram ID");
-        if (!get("token", "").equals(token) || chat()!=recipient) {
+    synchronized void configureBot(String token, String username, java.util.List<Long> recipients) {
+        SQLiteDatabase db=getWritableDatabase();db.beginTransaction();
+        try {
+        java.util.List<Long> checked=Rules.telegramIds(Rules.joinIds(recipients));
+        long recipient=checked.isEmpty()?0:checked.get(0);
+        if (!get("token", "").equals(token) || !chats().equals(checked)) {
             if (running() || enabled()) throw new IllegalStateException("Сначала останови бота");
             if (pending() > 0) throw new IllegalStateException("Сначала отправь или удали очередь прежнего бота");
-            put("chat", ""+recipient); put("chat_name", recipient==0?"":"Telegram ID "+recipient); put("offset", "0");
+            put("chat", ""+recipient);put("chat_ids",Rules.joinIds(checked)); put("chat_name", Rules.joinIds(checked)); put("offset", "0");
             put("epoch", UUID.randomUUID().toString()); put("draft", "{}");
             put("setup_code", ""); getWritableDatabase().delete("operations", null, null);
             getWritableDatabase().delete("outbox", "state='sent'", null);
         }
         put("token", token); put("bot_username", username); put("error", "");
         if (chat() == 0) setupCode();
+        db.setTransactionSuccessful();
+        } finally {db.endTransaction();}
     }
     synchronized String setupCode() {
         if (chat() != 0) return "";
@@ -65,7 +82,8 @@ final class Store extends SQLiteOpenHelper {
             return false;
         }
         SQLiteDatabase db=getWritableDatabase(); db.beginTransaction();
-        try {put("chat", ""+chat);put("chat_name", name);put("setup_code", "");put("setup_expires", "0");
+        try {put("chat", ""+chat);put("chat_ids",""+chat);put("chat_name", name);put("setup_code", "");put("setup_expires", "0");
+            ContentValues cv=new ContentValues();cv.put("route",route(chat));db.update("outbox",cv,"route='unclaimed'",null);
             put("setup_failures", "0");put("error", "");db.setTransactionSuccessful();return true;
         } finally {db.endTransaction();}
     }
@@ -74,7 +92,7 @@ final class Store extends SQLiteOpenHelper {
         try {
             if (enabled()) throw new IllegalStateException("Сначала остановите пересылку");
             if (pending() > 0) throw new IllegalStateException("Сначала отправьте или удалите очередь для прежнего чата");
-            put("token", token); put("chat", Long.toString(chat)); put("chat_name", name);
+            put("token", token); put("chat", Long.toString(chat));put("chat_ids",""+chat); put("chat_name", name);
             put("epoch", UUID.randomUUID().toString()); put("offset", "0"); put("draft", "{}");
             db.delete("operations", null, null);
             put("pair_nonce", ""); put("error", "");
@@ -110,12 +128,17 @@ final class Store extends SQLiteOpenHelper {
     }
     synchronized long enqueue(String fingerprint, JSONObject p) throws Exception {
         p.put("epoch", epoch());
-        ContentValues cv = new ContentValues(); cv.put("fingerprint", fingerprint); cv.put("payload", Crypto.seal(p.toString()));
-        cv.put("created", System.currentTimeMillis());
-        return getWritableDatabase().insertWithOnConflict("outbox", null, cv, SQLiteDatabase.CONFLICT_IGNORE);
+        java.util.List<Long> targets=chats();if(targets.isEmpty())targets=java.util.Collections.singletonList(0L);
+        SQLiteDatabase db=getWritableDatabase();db.beginTransaction();long first=-1;
+        try {for(long target:targets) {
+            JSONObject copy=new JSONObject(p.toString()).put("chat_id",target);
+            ContentValues cv=new ContentValues();cv.put("fingerprint",fingerprint+"|"+target);cv.put("payload",Crypto.seal(copy.toString()));
+            cv.put("created",System.currentTimeMillis());cv.put("route",route(target));
+            long id=db.insertWithOnConflict("outbox",null,cv,SQLiteDatabase.CONFLICT_IGNORE);if(first<0)first=id;
+        } db.setTransactionSuccessful();return first;}finally{db.endTransaction();}
     }
     synchronized JSONObject next() throws Exception {
-        try (Cursor c = getReadableDatabase().rawQuery("SELECT id,payload,part,attempts,next_try FROM outbox WHERE state='pending' ORDER BY id LIMIT 1", null)) {
+        try (Cursor c = getReadableDatabase().rawQuery("SELECT id,payload,part,attempts,next_try FROM outbox r WHERE state='pending' AND next_try<=? AND id=(SELECT MIN(id) FROM outbox q WHERE q.state='pending' AND q.route=r.route) ORDER BY id LIMIT 1", new String[]{""+System.currentTimeMillis()})) {
             if (!c.moveToFirst() || c.getLong(4) > System.currentTimeMillis()) return null;
             return new JSONObject(Crypto.open(c.getString(1))).put("id", c.getLong(0)).put("part", c.getInt(2)).put("attempts", c.getInt(3));
         }
@@ -147,8 +170,14 @@ final class Store extends SQLiteOpenHelper {
         try (Cursor c=getReadableDatabase().rawQuery("SELECT COUNT(*) FROM outbox WHERE state='sent' AND delivered>=?",new String[]{""+cal.getTimeInMillis()})) { c.moveToFirst();return c.getInt(0); }
     }
     synchronized JSONArray recent() throws Exception {
+        JSONArray out=new JSONArray();
+        try(Cursor c=getReadableDatabase().rawQuery("SELECT id,payload,state,error FROM outbox ORDER BY id DESC LIMIT 20",null)) {
+            while(c.moveToNext())out.put(new JSONObject(Crypto.open(c.getString(1))).put("id",c.getLong(0)).put("state",c.getString(2)).put("error",c.getString(3)));
+        }return out;
+    }
+    synchronized JSONArray recent(long target) throws Exception {
         JSONArray out = new JSONArray();
-        try (Cursor c = getReadableDatabase().rawQuery("SELECT id,payload,state,error FROM outbox ORDER BY id DESC LIMIT 10", null)) {
+        try (Cursor c = getReadableDatabase().rawQuery("SELECT id,payload,state,error FROM outbox WHERE route=? ORDER BY id DESC LIMIT 10", new String[]{route(target)})) {
             while(c.moveToNext()) out.put(new JSONObject(Crypto.open(c.getString(1))).put("id",c.getLong(0)).put("state",c.getString(2)).put("error",c.getString(3)));
         } return out;
     }

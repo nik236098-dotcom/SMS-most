@@ -17,6 +17,7 @@ public class BotSetupTest {
         s=mock(Store.class);api=mock(Telegram.class);values=new HashMap<>();owner=0;
         when(s.running()).thenReturn(true);when(s.enabled()).thenReturn(false);
         when(s.chat()).thenAnswer(i->owner);
+        when(s.chats()).thenAnswer(i->owner==0?java.util.Collections.emptyList():java.util.Collections.singletonList(owner));
         when(s.get(anyString(),anyString())).thenAnswer(i->values.getOrDefault(i.getArgument(0),i.getArgument(1)));
         doAnswer(i->{values.put(i.getArgument(0),i.getArgument(1));return null;}).when(s).put(anyString(),anyString());
         when(s.beginOperation(anyLong())).thenReturn(true);
@@ -47,7 +48,7 @@ public class BotSetupTest {
     @Test public void wrongCodeCannotAccessMenuOrSms() throws Exception {
         updates(message("99999999",456,"private"));bot.poll(api,0);
         assertEquals(0,owner);verify(api).send(eq(456L),contains("Код неверный"),isNull());
-        verify(s,never()).recent();
+        verify(s,never()).recent(anyLong());
     }
     @Test public void configuredOwnerAnswersEvenWhenSmsDisabled() throws Exception {
         owner=456;updates(message("/start",456,"private"));bot.poll(api,0);
@@ -55,7 +56,18 @@ public class BotSetupTest {
     }
     @Test public void otherAccountCannotAccessConfiguredBot() throws Exception {
         owner=789;updates(message("/start",456,"private"));bot.poll(api,0);
-        verify(api,never()).send(anyLong(),anyString(),any());verify(s,never()).recent();
+        verify(api,never()).send(anyLong(),anyString(),any());verify(s,never()).recent(anyLong());
+    }
+    @Test public void secondAllowedAccountGetsItsOwnReply() throws Exception {
+        owner=789;when(s.chats()).thenReturn(java.util.Arrays.asList(789L,456L));
+        updates(message("/start",456,"private"));bot.poll(api,0);
+        verify(api).send(eq(456L),contains("SMS Мост"),notNull());
+        verify(api,never()).send(eq(789L),anyString(),any());
+    }
+    @Test public void forgedSenderCannotUseAllowedChat() throws Exception {
+        owner=456;JSONObject update=message("/start",456,"private");
+        update.getJSONObject("message").getJSONObject("from").put("id",999);
+        updates(update);bot.poll(api,0);verify(api,never()).send(anyLong(),anyString(),any());
     }
     @Test public void groupCannotClaimPhone() throws Exception {
         updates(message("01234567",456,"group"));bot.poll(api,0);

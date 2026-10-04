@@ -12,3 +12,4 @@ java -cp build/core-tests ParseJava app/src/main/java
 java -cp build/core-tests ParseJava tools
 python3 -m py_compile tools/prepare_signer.py tools/build_companion.py tools/check_manifest.py
 python3 tools/check_manifest.py
+python3 tools/test_queue.py

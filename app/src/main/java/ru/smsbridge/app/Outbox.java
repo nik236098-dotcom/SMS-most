@@ -12,9 +12,11 @@ final class Outbox {
         Store s=BridgeApp.store();if(!s.enabled()||s.chat()==0||!DRAINING.compareAndSet(false,true))return;
         PowerManager.WakeLock lock=c.getSystemService(PowerManager.class).newWakeLock(PowerManager.PARTIAL_WAKE_LOCK,"smsbridge:delivery");
         try {
-            lock.acquire(90000);Telegram t=new Telegram(s.get("token",""));long destination=s.chat();String epoch=s.epoch();
+            lock.acquire(90000);Telegram t=new Telegram(s.get("token",""));String epoch=s.epoch();
             for(int count=0;count<5 && s.enabled();count++) {
                 JSONObject p=s.next();if(p==null)return;long id=p.getLong("id");
+                long destination=p.optLong("chat_id");if(destination<=0)destination=s.chat();
+                if(!s.chats().contains(destination)){s.failed(id,0,86400,"Получатель изменился: доставка остановлена");continue;}
                 if(!p.optString("epoch").equals(s.epoch())){s.failed(id,0,86400,"Чат изменился: очередь нельзя перенаправить другому получателю");return;}
                 List<String> chunks=Rules.chunks(Bot.format(p));
                 try {
@@ -23,7 +25,11 @@ final class Outbox {
                         String text=chunks.get(i)+(chunks.size()>1?"\n[SMS #"+id+" · часть "+(i+1)+"/"+chunks.size()+"]":"");
                         t.call("sendMessage",new JSONObject().put("chat_id",destination).put("text",text).put("protect_content",true));s.progress(id,i+1);
                     }s.delivered(id);
-                } catch(Exception e) {s.failed(id,p.optInt("attempts"),e instanceof Telegram.ApiError?((Telegram.ApiError)e).retry:0,Telegram.safe(e));return;}
+                } catch(Exception e) {
+                    boolean blocked=e instanceof Telegram.ApiError && (((Telegram.ApiError)e).code==403 || ((Telegram.ApiError)e).code==400);
+                    s.failed(id,p.optInt("attempts"),blocked?86400:e instanceof Telegram.ApiError?((Telegram.ApiError)e).retry:0,Telegram.safe(e));
+                    if(!blocked)return;
+                }
             }
         } catch(Exception e){s.put("error",Telegram.safe(e));}
         finally {if(lock.isHeld())lock.release();DRAINING.set(false);}

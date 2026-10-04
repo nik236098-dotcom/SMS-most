@@ -10,6 +10,12 @@ public final class RulesTest {
         check(Rules.phone("+84901234567").equals("+84901234567"),"International phone");
         check(Rules.telegramId(" 123456789 ")==123456789L,"Telegram ID");
         check(Rules.telegramId("7999123456")==7999123456L,"Large Telegram ID");
+        check(Rules.telegramIds("123, 456; 123\n789").equals(java.util.Arrays.asList(123L,456L,789L)),"Multiple IDs and duplicate removal");
+        check(Rules.telegramIds("").isEmpty(),"Optional code setup");
+        check(Rules.authorized(Rules.telegramIds("123,456"),456,"private",false),"Second allowed account");
+        check(!Rules.authorized(Rules.telegramIds("123,456"),789,"private",false),"Other account blocked");
+        check(!Rules.authorized(Rules.telegramIds("123,456"),456,"group",false),"Allowed ID in group denied");
+        rejects(()->Rules.telegramIds("1,2,3,4,5,6,7,8,9,10,11"));
         for(String id:new String[]{"-100123","0","@username","+79991234567","abc","","4503599627370496"})rejects(()->Rules.telegramId(id));
         for(String p:new String[]{"79991234567","+00000","+7","+1234567890123456","+7999abc","","+7999\n/start"})rejects(()->Rules.phone(p));
         String eid="89049032123456789012345678901234",icc="8901234567890123456";

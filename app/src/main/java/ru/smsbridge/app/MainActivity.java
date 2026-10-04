@@ -70,9 +70,9 @@ public final class MainActivity extends Activity {
     private void home() {
         page("SMS Мост","Бот работает с этого телефона · сервер не нужен");homeVisible=true;
         tokenInput=input("Вставь токен из @BotFather",true);tokenInput.setText(s.get("token",""));
-        idInput=input("Твой Telegram ID — число, например 123456789",false);idInput.setInputType(InputType.TYPE_CLASS_NUMBER);
-        if(s.chat()>0)idInput.setText(""+s.chat());
-        label(root,"Укажи ID того, кто будет получать SMS. Бот будет отвечать только этому аккаунту. После запуска напиши боту /start со своего Telegram. Telegram на Android открывать не нужно. Если ID неизвестен, оставь поле пустым — подключение по коду.",14,false);
+        idInput=input("Telegram ID: 123456789, 987654321",false);idInput.setSingleLine(false);idInput.setMaxLines(3);
+        if(s.chat()>0)idInput.setText(Rules.joinIds(s.chats()));
+        label(root,"Укажи ID получателей через запятую, до 10 аккаунтов. Бот отвечает только им и отправляет SMS каждому. Каждый получатель должен написать боту /start. Telegram на Android открывать не нужно. Если ID неизвестен, оставь поле пустым — подключение одного получателя по коду.",14,false);
         relayToggle=button(root,s.running()?"Остановить бота":"Запустить бота",true,()->{if(s.running())stop();else launch();});
         LinearLayout state=card();status=label(state,"",20,true);connection=label(state,"",15,false);setupLabel=label(state,"",18,true);
         button(state,"Скопировать данные подключения",false,()->{
@@ -81,7 +81,10 @@ public final class MainActivity extends Activity {
         });
         stats=label(card(),"",20,true);error=label(root,"",14,false);error.setTextColor(Color.rgb(255,196,105));
         button(root,"Отправить тест в Telegram",true,()->{if(s.chat()==0){toast("Сначала отправь код боту со своего Telegram");return;}if(!s.running()){toast("Сначала запусти бота");return;}background(()->{
-            new Telegram(s.get("token","")).send(s.chat(),"✅ Телефон подключён. Это тест SMS Мост.\nПересылка SMS: "+(s.enabled()?"включена":"нет разрешения на SMS — открой настройки Android"),null);return "Тест отправлен";
+            Telegram t=new Telegram(s.get("token",""));int sent=0;String failure="";
+            for(long target:s.chats())try{t.send(target,"✅ Телефон подключён. Это тест SMS Мост.\nПересылка SMS: "+(s.enabled()?"включена":"нет разрешения на SMS — открой настройки Android"),null);sent++;}catch(Exception e){failure=Telegram.safe(e);}
+            if(!failure.isEmpty())s.put("error",failure+". Каждый получатель должен нажать «Начать» в боте.");
+            return "Тест отправлен: "+sent+" из "+s.chats().size();
         },this::toast);});
         button(root,"Номер SIM и настройки",false,this::settings);
         button(root,"Последние SMS и очередь",false,this::history);
@@ -95,19 +98,19 @@ public final class MainActivity extends Activity {
         setupLabel.setText(running&&s.chat()==0?"Код подключения: "+s.setupCode()+"\nОтправь эти 8 цифр боту со своего Telegram. Код действует 30 минут.":"");
         setupLabel.setVisibility(running&&s.chat()==0?View.VISIBLE:View.GONE);
         long seen=Long.parseLong(s.get("bot_last_seen","0"));String api=seen==0?"Ожидается первый ответ Telegram":System.currentTimeMillis()-seen<60000?"Telegram отвечает ✓":"Давно нет ответа Telegram";
-        stats.setText(api+"\nSMS: "+(s.enabled()?(s.chat()>0?"пересылка включена":"ожидают подключения получателя"):"нужно разрешение SMS или запуск бота")+"\nОтправлено сегодня: "+s.today()+" · очередь: "+s.pending());
+        stats.setText(api+"\nSMS: "+(s.enabled()?(s.chat()>0?"пересылка включена":"ожидают подключения получателя"):"нужно разрешение SMS или запуск бота")+"\nДоставок сегодня: "+s.today()+" · очередь: "+s.pending());
         error.setText(s.get("bot_error","")+ (s.get("bot_error","").isEmpty()?"":"\n")+s.get("error",""));
     }
     private void launch() {
         if(launching)return;String token=tokenInput.getText().toString().trim();launching=true;refresh();
-        String idText=idInput.getText().toString().trim();final long recipient;
-        try{recipient=idText.isEmpty()?0:Rules.telegramId(idText);}catch(Exception e){launching=false;s.put("bot_error",Telegram.safe(e));refresh();return;}
+        String idText=idInput.getText().toString().trim();final java.util.List<Long> recipients;
+        try{recipients=Rules.telegramIds(idText);}catch(Exception e){launching=false;s.put("bot_error",Telegram.safe(e));refresh();return;}
         worker.submit(()->{
             try {
                 Telegram t=new Telegram(token);JSONObject wh=t.call("getWebhookInfo",new JSONObject()).getJSONObject("result");
                 if(!wh.optString("url").isEmpty())throw new UserError("Этот бот подключён к другому серверу. Используй отдельного бота из @BotFather.");
                 String username=t.call("getMe",new JSONObject()).getJSONObject("result").getString("username");
-                s.configureBot(token,username,recipient);s.put("bot_error","");s.put("bot_last_seen","0");
+                s.configureBot(token,username,recipients);s.put("bot_error","");s.put("bot_last_seen","0");
                 handler.post(()->{launching=false;if(alive)permissions();});
             } catch(Exception e) {s.put("bot_error",Telegram.safe(e));handler.post(()->{launching=false;if(alive){refresh();toast(Telegram.safe(e));}});}
         });
@@ -128,6 +131,7 @@ public final class MainActivity extends Activity {
         page("Доставка SMS","Номер закрепляется в момент получения сообщения");
         try {JSONArray rows=s.recent();if(rows.length()==0)label(root,"Сообщений пока нет",17,false);
             for(int i=0;i<rows.length();i++){JSONObject p=rows.getJSONObject(i);LinearLayout c=card();label(c,p.optString("recipient"),19,true);
+                label(c,"Доставка в Telegram ID: "+p.optLong("chat_id",s.chat()),14,false);
                 label(c,"Сервис: "+Rules.service(p.optString("sender")),16,true);label(c,"Отправитель: "+p.optString("sender"),14,false);
                 label(c,p.optString("body"),15,false);label(c,p.optString("state").equals("sent")?"✓ Доставлено":"В очереди · "+p.optString("error"),14,false);
             }}catch(Exception e){toast("Не удалось прочитать историю");}
