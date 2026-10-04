@@ -122,7 +122,7 @@ public final class MainActivity extends Activity {
         java.util.ArrayList<String> missing=new java.util.ArrayList<>();for(String p:ps)if(checkSelfPermission(p)!=PackageManager.PERMISSION_GRANTED)missing.add(p);
         if(missing.isEmpty())start();else requestPermissions(missing.toArray(new String[0]),41);
     }
-    @Override public void onRequestPermissionsResult(int code,String[] ps,int[] grants){super.onRequestPermissionsResult(code,ps,grants);if(code==41)start();}
+    @Override public void onRequestPermissionsResult(int code,String[] ps,int[] grants){super.onRequestPermissionsResult(code,ps,grants);if(code==41)start();else if(code==42){if(checkSelfPermission(Manifest.permission.READ_PHONE_STATE)==PackageManager.PERMISSION_GRANTED)physical();else toast("Без разрешения «Телефон» Android не предоставит список SIM");}}
     private void start(){try{
         s.put("bot_enabled","true");s.put("enabled",""+(checkSelfPermission(Manifest.permission.RECEIVE_SMS)==PackageManager.PERMISSION_GRANTED));
         RelayService.start(this);home();
@@ -159,7 +159,7 @@ public final class MainActivity extends Activity {
         button(root,"Назад",false,this::settings);
     }
     private void physical() {
-        if(checkSelfPermission(Manifest.permission.READ_PHONE_STATE)!=PackageManager.PERMISSION_GRANTED){requestPermissions(new String[]{Manifest.permission.READ_PHONE_STATE},42);toast("После выдачи разрешения открой эту страницу ещё раз");return;}
+        if(checkSelfPermission(Manifest.permission.READ_PHONE_STATE)!=PackageManager.PERMISSION_GRANTED){requestPermissions(new String[]{Manifest.permission.READ_PHONE_STATE},42);return;}
         page("Мои SIM-карты","SIM определяются Android. Для пересылки SMS компонент 9eSIM не нужен.");
         try {List<SubscriptionInfo> list=getSystemService(SubscriptionManager.class).getActiveSubscriptionInfoList();
             if(list==null||list.isEmpty())label(root,"Активных SIM пока нет",16,false);
