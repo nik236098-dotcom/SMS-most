@@ -21,6 +21,7 @@ import kotlinx.coroutines.flow.toList
 import net.typeblog.lpac_jni.LocalProfileInfo
 import org.json.JSONArray
 import org.json.JSONObject
+import ru.smsbridge.app.EsimErrors
 
 /** Bound service owns APDU channels. This non-exported provider accepts only this app UID. */
 class GatewayProvider : ContentProvider() {
@@ -43,7 +44,7 @@ class GatewayProvider : ContentProvider() {
                     return@runBlocking error("phone_permission_required")
                 if(uri.getQueryParameter("callbackUrl") != null) throw SecurityException("Callbacks disabled")
                 val action = uri.lastPathSegment
-                if(action !in setOf("cards","profiles","downloadProfile","enableProfile","setPreference"))
+                if(action !in setOf("cards","profiles","cardInfo","downloadProfile","enableProfile","deleteProfile","setPreference"))
                     throw SecurityException("Unsupported operation")
                 if(action == "setPreference") {
                     require(uri.getQueryParameter("name") == "ignoreTlsCertificate" && uri.getQueryParameter("enabled") == "false")
@@ -83,8 +84,10 @@ class GatewayProvider : ContentProvider() {
                 is EuiccChannelManager.EuiccChannelNotFoundException -> "card_access_denied"
                 else -> "adapter_operation_failed"
             }
-            // No activation code, PIN or server response is returned to an error log.
-            return MatrixCursor(arrayOf("rows")).apply { addRow(arrayOf(error(code).toString())) }
+            val rows = if(e is net.typeblog.lpac_jni.LocalProfileAssistant.ProfileDownloadException)
+                JSONArray().put(EsimErrors.download(e.lpaErrorReason,e.lastHttpResponse?.rcode ?: 0,e.lastHttpResponse?.data,e.lastHttpException,e.lastApduResponse))
+                else error(code)
+            return MatrixCursor(arrayOf("rows")).apply { addRow(arrayOf(rows.toString())) }
         } finally { Binder.restoreCallingIdentity(identity) }
     }
     private suspend fun handle(service: EuiccChannelManagerService, uri: Uri, action: String): JSONArray {
@@ -103,14 +106,25 @@ class GatewayProvider : ContentProvider() {
         val port = uri.getQueryParameter("port")?.toInt() ?: 0
         require(slot in 0..7 && port in 0..7)
         if(action == "profiles")return JSONArray(manager.withEuiccChannel(slot,port,SE) { c -> c.lpa.profiles.map { profile(it) } })
+        if(action == "cardInfo") {
+            val info = manager.withEuiccChannel(slot,port,SE) { it.lpa.euiccInfo2 }
+            return JSONArray().put(JSONObject().apply { if(info != null && info.freeNvram >= 0)put("free_nvram_bytes",info.freeNvram) })
+        }
         if(action == "downloadProfile") {
             val ac = LPAString.parse(requireNotNull(uri.getQueryParameter("activationCode")))
             val pin = uri.getQueryParameter("confirmationCode")
             require(!ac.confirmationCodeRequired || !pin.isNullOrBlank())
             val before = manager.withEuiccChannel(slot,port,SE) { c -> c.lpa.profiles.map { it.iccid }.toSet() }
             // Reuse the upstream task queue so local UI and Telegram cannot mutate the card concurrently.
-            service.launchProfileDownloadTask(slot,port,SE,ac.address,ac.matchingId,pin,null)
-                .waitDone()?.let { throw it }
+            val failure = service.launchProfileDownloadTask(slot,port,SE,ac.address,ac.matchingId,pin,null).waitDone()
+            if(failure != null) {
+                if(failure !is net.typeblog.lpac_jni.LocalProfileAssistant.ProfileDownloadException)throw failure
+                val details = EsimErrors.download(failure.lpaErrorReason,failure.lastHttpResponse?.rcode ?: 0,
+                    failure.lastHttpResponse?.data,failure.lastHttpException,failure.lastApduResponse)
+                runCatching { manager.withEuiccChannel(slot,port,SE) { it.lpa.euiccInfo2?.freeNvram } }
+                    .getOrNull()?.takeIf { it >= 0 }?.let { details.put("free_nvram_bytes",it) }
+                return JSONArray().put(details)
+            }
             val added = manager.withEuiccChannel(slot,port,SE) { c -> c.lpa.profiles.filter { it.iccid !in before } }
             check(added.size == 1)
             return JSONArray().put(profile(added.single()))
@@ -122,6 +136,26 @@ class GatewayProvider : ContentProvider() {
                 .waitDone()?.let { throw it }
             val active = manager.withEuiccChannel(slot,port,SE) { c -> c.lpa.profiles.any { it.iccid == iccid && it.state == LocalProfileInfo.State.Enabled } }
             return JSONArray().put(JSONObject().put("success",active))
+        }
+        if(action == "deleteProfile") {
+            val eid = requireNotNull(uri.getQueryParameter("expectedEid"))
+            val iccid = requireNotNull(uri.getQueryParameter("iccid"))
+            require(iccid.matches(Regex("[0-9]{10,24}")))
+            val found = manager.withEuiccChannel(slot,port,SE) { channel ->
+                check(channel.lpa.eID == eid)
+                channel.lpa.profiles.find { it.iccid == iccid }
+            } ?: return error("profile_not_found")
+            if(found.state == LocalProfileInfo.State.Enabled) {
+                if(uri.getQueryParameter("allowActive") != "true")return error("profile_became_active")
+                service.launchProfileSwitchTask(slot,port,SE,iccid,false,20000L,eid).waitDone()?.let { throw it }
+            }
+            val failure = service.launchProfileDeleteTask(slot,port,SE,iccid,eid).waitDone()
+            val remains = manager.withEuiccChannel(slot,port,SE) { channel ->
+                check(channel.lpa.eID == eid)
+                channel.lpa.profiles.any { it.iccid == iccid }
+            }
+            if(remains)return error("profile_delete_failed")
+            return JSONArray().put(JSONObject().put("success",true).put("notification_warning",failure != null))
         }
         return error("unsupported_operation")
     }

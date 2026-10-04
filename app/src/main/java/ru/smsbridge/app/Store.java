@@ -122,6 +122,7 @@ final class Store extends SQLiteOpenHelper {
         ContentValues cv = new ContentValues(); cv.put("profile", profile); cv.put("number", Crypto.seal(Rules.phone(number)));
         getWritableDatabase().insertWithOnConflict("numbers", null, cv, SQLiteDatabase.CONFLICT_REPLACE);
     }
+    synchronized void forgetNumber(String profile) {getWritableDatabase().delete("numbers","profile=?",new String[]{profile});}
     synchronized String number(String profile) throws Exception {
         try (Cursor c = getReadableDatabase().rawQuery("SELECT number FROM numbers WHERE profile=?", new String[]{profile})) {
             return c.moveToFirst() ? Crypto.open(c.getString(0)) : "Номер не задан";

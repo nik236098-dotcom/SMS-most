@@ -3,7 +3,7 @@ android {
     namespace 'ru.smsbridge.app'
     compileSdk 35
     buildFeatures { buildConfig true }
-    defaultConfig { applicationId 'ru.smsbridge.app'; minSdk 28; targetSdk 35; versionCode 9; versionName '0.9.0' }
+    defaultConfig { applicationId 'ru.smsbridge.app'; minSdk 28; targetSdk 35; versionCode 10; versionName '0.10.0' }
     defaultConfig { buildConfigField 'String', 'LPA_SIGNER_SHA256', '"' + (project.findProperty('lpaSignerSha256') ?: '') + '"' }
     compileOptions { sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 }
     buildTypes { release { minifyEnabled false } }

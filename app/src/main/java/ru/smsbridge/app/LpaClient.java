@@ -28,10 +28,13 @@ final class LpaClient {
             int rows=c.getColumnIndex("rows"); if(rows<0) throw new UserError("Несовместимая версия компонента 9eSIM");
             JSONArray data=new JSONArray(c.getString(rows));
             for(int i=0;i<data.length();i++) if(data.getJSONObject(i).has("error")) {
-                String code=data.getJSONObject(i).optString("error");
+                JSONObject details=data.getJSONObject(i);String code=details.optString("error");
                 throw new UserError(code.equals("phone_permission_required")?"Разреши доступ к телефону в SMS Мост, затем открой встроенное управление 9eSIM":
                     code.equals("card_access_denied")?"Нет доступа к карте: открой встроенное управление 9eSIM и проверь слот адаптера":
-                    code.equals("profile_download_failed")?"Оператор отклонил загрузку eSIM или сервер недоступен. Проверь профиль во встроенном управлении; не отправляй QR повторно автоматически":
+                    code.equals("profile_download_failed")?EsimErrors.describe(details):
+                    code.equals("profile_became_active")?"Профиль стал активным. Открой его заново и подтверди удаление с отключением связи":
+                    code.equals("profile_not_found")?"Профиль больше не найден. Обнови /esim":
+                    code.equals("profile_delete_failed")?"Удаление не подтверждено: профиль остался на карте. Обнови /esim и проверь состояние":
                     code.equals("adapter_busy_or_reconnecting")?"Адаптер занят или переподключается. Подожди и обнови список профилей":
                     "Адаптер не выполнил операцию. Открой встроенное управление 9eSIM и проверь профили перед повтором.");
             }
@@ -42,6 +45,18 @@ final class LpaClient {
     JSONArray cards() throws Exception { return query("cards",new HashMap<>()); }
     Map<String,String> args(int slot,int port) {Map<String,String> a=new HashMap<>();a.put("slot",""+slot);a.put("port",""+port);return a;}
     JSONArray profiles(int slot,int port) throws Exception {return query("profiles",args(slot,port));}
+    JSONObject info(JSONObject card) throws Exception {
+        JSONArray rows=query("cardInfo",args(card.getInt("slot"),card.optInt("port",0)));
+        return rows.length()==1?rows.getJSONObject(0):new JSONObject();
+    }
+    JSONObject delete(String eid,String iccid,boolean allowActive) throws Exception {
+        JSONObject card=card();if(!card.getString("eid").equals(eid))throw new UserError("Адаптер изменился. Начни операцию заново.");
+        Map<String,String>a=args(card.getInt("slot"),card.optInt("port",0));
+        a.put("expectedEid",eid);a.put("iccid",iccid);a.put("allowActive",Boolean.toString(allowActive));
+        JSONArray rows=query("deleteProfile",a);
+        if(rows.length()!=1||!rows.getJSONObject(0).optBoolean("success"))throw new UserError("Удаление не подтверждено. Обнови /esim и проверь профиль.");
+        return rows.getJSONObject(0);
+    }
     JSONObject card() throws Exception {
         JSONArray a=cards();if(a.length()!=1) throw new UserError(a.length()==0?"9eSIM не обнаружен":"Найдено несколько адаптеров. Эта версия рассчитана на один 9eSIM.");return a.getJSONObject(0);
     }

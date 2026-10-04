@@ -94,6 +94,7 @@ final class Bot {
             if(data.equals("cancel")){s.put(draftKey(),"{}");menu(t,m);return;}
             if(data.startsWith("confirm:")){confirm(t,m,data.substring(8));return;}
             if(data.startsWith("select:")){select(t,m,data.substring(7));return;}
+            if(data.startsWith("delete:")){beginDelete(t,m,data.substring(7));return;}
             if(data.equals("rename")){rename(t,m);return;}
             return;
         }
@@ -202,6 +203,7 @@ final class Bot {
         throw new UserError("Профиль больше не найден на адаптере. Обнови список: /esim");
     }
     private void adapterProfiles(Telegram t,JSONObject m,int requestedPage) throws Exception {
+        s.put(draftKey(),"{}");
         if(!s.get("esim_control","false").equals("true") || !lpa.installed()) {
             show(t,m,"Профили 9eSIM\nНа телефоне открой SMS Мост → Настройки → 9eSIM → Разрешить управление → Проверить адаптер.\nУправление встроено в объединённый APK SMS Моста.\nДля обычных SIM и пересылки SMS включать его не нужно.",keyboard(button("Обновить","adapter"),button("Мои SIM-карты","profiles"),button("Назад","menu")));return;
         }
@@ -211,6 +213,8 @@ final class Bot {
         JSONObject cache=new JSONObject().put("eid",card.getString("eid")).put("profiles",ps).put("nonce",nonce).put("epoch",s.epoch()).put("page",page).put("expires",System.currentTimeMillis()+10*60000L);
         s.put(menuKey(),cache.toString());
         StringBuilder text=new StringBuilder("Профили 9eSIM · слот ").append(card.getInt("slot")+1).append("\nВсего: ").append(ps.length()).append("\n");JSONArray rows=new JSONArray();
+        JSONObject info=null;try {info=lpa.info(card);}catch(Exception ignored){}
+        text.append(EsimErrors.memory(info)).append("\n");
         boolean hasActive=false;
         for(int i=0;i<ps.length();i++) {
             JSONObject p=ps.getJSONObject(i);if(p.optBoolean("enabled")){hasActive=true;text.append("🟢 Активен: ").append(profileLabel(card,p)).append("\n");}
@@ -231,7 +235,7 @@ final class Bot {
             if(page+1<pages)navigation.put(button("Далее →","adapter:"+(page+1)));
             rows.put(navigation);
         }
-        text.append("\nНажми на профиль, чтобы переключить его или задать номер. SMS принимаются на активный профиль.");
+        text.append("\nНажми на профиль, чтобы переключить, удалить его или задать номер. SMS принимаются на активный профиль.");
         rows.put(new JSONArray().put(button("Обновить список","adapter:"+page)));
         rows.put(new JSONArray().put(button("Добавить eSIM по QR-коду","add")));rows.put(new JSONArray().put(button("Главное меню","menu")));
         show(t,m,text.toString(),new JSONObject().put("inline_keyboard",rows));
@@ -247,6 +251,7 @@ final class Bot {
         JSONArray rows=new JSONArray();
         if(!p.optBoolean("enabled"))rows.put(new JSONArray().put(button("Переключить на этот профиль","confirm:"+d.getString("nonce"))));
         rows.put(new JSONArray().put(button("Задать / изменить номер","rename")));
+        rows.put(new JSONArray().put(button("Удалить профиль","delete:"+d.getString("nonce"))));
         rows.put(new JSONArray().put(button("К списку профилей","adapter:"+cache.optInt("page",0))));
         show(t,m,profileName(p)+"\nНомер: "+s.number(key)+"\nОператор: "+shortName(p.optString("provider"),48)+"\nICCID: "+p.getString("iccid")
             +(p.optBoolean("enabled")?"\n\n🟢 Этот профиль уже активен.":"\n\nПри переключении текущий профиль отключится. Мобильная связь временно прервётся; оставь телефон на Wi-Fi.")
@@ -256,11 +261,43 @@ final class Bot {
         JSONObject d=draft();if(!d.has("key"))throw new UserError("Сначала выбери профиль");
         d.put("stage","rename_phone");s.put(draftKey(),d.toString());show(t,m,"Введи номер для этого профиля, начиная с + и кода страны.",keyboard(button("Отмена","cancel")));
     }
+    private void beginDelete(Telegram t,JSONObject m,String nonce) throws Exception {
+        requireAdapterControl();JSONObject selected=draft();
+        if(!selected.optString("stage").equals("confirm_enable")||!selected.optString("nonce").equals(nonce))
+            throw new UserError("Выбор профиля устарел. Открой его заново: /esim");
+        JSONObject card=lpa.card();if(!card.getString("eid").equals(selected.optString("eid")))throw new UserError("Адаптер изменился. Обнови /esim");
+        JSONObject p=findProfile(card,selected.getString("iccid"));boolean active=p.optBoolean("enabled");
+        JSONObject d=newDraft("confirm_delete").put("eid",card.getString("eid")).put("iccid",p.getString("iccid"))
+            .put("key",selected.getString("key")).put("allow_active",active);
+        s.put(draftKey(),d.toString());
+        show(t,m,"Удалить eSIM с адаптера?\n"+profileName(p)+"\nНомер: "+s.number(d.getString("key"))+"\nICCID: "+p.getString("iccid")
+            +"\n\nПрофиль будет удалён с карты. Старый QR-код может не подойти для повторной установки — это зависит от оператора."
+            +(active?"\n\nЭтот профиль активен: перед удалением он отключится, SMS и звонки на него перестанут приходить. Оставь телефон на Wi-Fi.":""),
+            keyboard(button(active?"Отключить и удалить":"Подтвердить удаление","confirm:"+d.getString("nonce")),button("Отмена","cancel")));
+    }
+    private void confirmDelete(Telegram t,JSONObject m,JSONObject d,JSONObject card) throws Exception {
+        JSONObject p=findProfile(card,d.getString("iccid"));
+        if(p.optBoolean("enabled")&&!d.optBoolean("allow_active"))throw new UserError("Профиль стал активным. Открой его заново и подтверди удаление с отключением связи.");
+        s.put(draftKey(),"{}");show(t,m,"Удаляем выбранный профиль… Дождись проверки адаптера.",null);
+        s.put("switching","true");s.clearActive();boolean verified=false;
+        try {
+            JSONObject result=lpa.delete(d.getString("eid"),d.getString("iccid"),d.optBoolean("allow_active"));
+            // The provider verifies absence on the same EID. Only then discard this number binding.
+            if(result==null||!result.optBoolean("success"))throw new UserError("Удаление не подтверждено. Обнови /esim.");
+            s.forgetNumber(d.getString("key"));s.put(menuKey(),"{}");verified=true;
+            boolean refreshed=false;try {lpa.refresh(s);s.put("switching","false");refreshed=true;}catch(Exception ignored){}
+            String message="✅ Профиль удалён с адаптера.\nICCID: "+d.getString("iccid")
+                +(result.optBoolean("notification_warning")?"\nУведомление серверу оператора не подтверждено. На карте профиль уже отсутствует.":"")
+                +(!refreshed?"\nНе удалось обновить активный профиль. Нажми «Обновить список».":"");
+            t.send(replyTo(),message,keyboard(button("Обновить список","adapter")));
+        } finally {if(!verified)s.put("error","eSIM: удаление не подтверждено; проверь /esim");}
+    }
     private void confirm(Telegram t,JSONObject m,String nonce) throws Exception {
         JSONObject d=draft();if(!d.optString("nonce").equals(nonce))throw new UserError("Подтверждение устарело. Начни операцию заново.");
         if(!s.get("esim_control","false").equals("true"))throw new UserError("Управление адаптером выключено на телефоне");
         JSONObject card=lpa.card();if(!card.getString("eid").equals(d.optString("eid")))throw new UserError("Адаптер изменился. Начни операцию заново.");
-        String stage=d.optString("stage");if(!stage.equals("confirm_add")&&!stage.equals("confirm_enable"))return;
+        String stage=d.optString("stage");if(stage.equals("confirm_delete")){confirmDelete(t,m,d,card);return;}
+        if(!stage.equals("confirm_add")&&!stage.equals("confirm_enable"))return;
         if(stage.equals("confirm_add")) {
             String[] activation=d.getString("code").split("\\$",-1);
             if(activation.length>4 && activation[4].equals("1") && d.optString("pin").isEmpty())
@@ -283,7 +320,10 @@ final class Bot {
                 // Persist intended number/code first. If the chip succeeds but the response is lost,
                 // reconciliation is manual instead of falsely attributing it to another number.
                 s.put("last_install",d.toString());
-                JSONObject p=lpa.download(d.getString("code"),d.optString("pin"));iccid=p.getString("iccid");
+                JSONObject p;
+                try {p=lpa.download(d.getString("code"),d.optString("pin"));s.put("esim_last_error","");}
+                catch(Exception e){s.put("esim_last_error",Telegram.safe(e));throw e;}
+                iccid=p.getString("iccid");
                 String key=Rules.profileKey(p.getString("eid"),iccid);number=d.getString("number");s.number(key,number);
             } else number=s.number(d.getString("key"));
             lpa.enable(iccid);
@@ -309,7 +349,7 @@ final class Bot {
         try {t.call("editMessageText",p);}catch(Telegram.ApiError e){if(e.code!=400)throw e;}
     }
     private void menu(Telegram t,JSONObject m) throws Exception {show(t,m,"SMS Мост\n"+status(),keyboard(button("Проверить связь","test"),button("Статус телефона","status"),button("Последние SMS","last"),button("Входящие звонки","calls"),button("Мои SIM-карты","profiles"),button("Профили 9eSIM","adapter")));}
-    private String status() {return "Телефон на связи\n"+SmsDiagnostics.report(s)+"\n\n"+CallDiagnostics.report(s)+"\nОтправлено сегодня: "+s.today()+"\nВ очереди: "+s.pending()+"\n"+s.get("device_status","");}
+    private String status() {String error=s.get("esim_last_error","");return "Телефон на связи\n"+SmsDiagnostics.report(s)+"\n\n"+CallDiagnostics.report(s)+"\nОтправлено сегодня: "+s.today()+"\nВ очереди: "+s.pending()+"\n"+s.get("device_status","")+(error.isEmpty()?"":"\n\nПоследняя ошибка загрузки eSIM:\n"+error);}
     private void recent(Telegram t,JSONObject m) throws Exception {
         StringBuilder b=new StringBuilder("Последние SMS\n");JSONArray rows=s.recent(replyTo(),"sms");
         for(int i=0;i<rows.length();i++){JSONObject p=rows.getJSONObject(i);b.append("\n#").append(p.getLong("id")).append(" · ").append(p.optString("recipient")).append("\n")

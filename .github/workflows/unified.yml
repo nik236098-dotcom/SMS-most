@@ -6,6 +6,7 @@ on:
       - 'app/**'
       - 'adapter/**'
       - 'tools/build_unified.py'
+      - 'tools/patch_profile_delete.py'
       - '.github/workflows/unified.yml'
   workflow_dispatch:
 permissions:
