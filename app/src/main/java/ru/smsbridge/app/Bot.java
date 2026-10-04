@@ -16,13 +16,14 @@ import java.util.UUID;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 final class Bot {
-    private final Store s; private final LpaClient lpa; private long currentChat;
+    private final Store s; private final LpaClient lpa; private final NativeSims sims; private long currentChat;
     private long replyTo(){return currentChat>0?currentChat:s.chat();}
     private String draftKey(){return "draft:"+replyTo();}
     private String menuKey(){return "profile_menu:"+replyTo();}
     private static final AtomicBoolean POLLING=new AtomicBoolean(false);
-    Bot(Context c) {s=BridgeApp.store();lpa=new LpaClient(c);}
-    Bot(Store store,LpaClient adapter) {s=store;lpa=adapter;}
+    Bot(Context c) {s=BridgeApp.store();lpa=new LpaClient(c);sims=NativeSims.on(c);}
+    Bot(Store store,LpaClient adapter) {this(store,adapter,()->new JSONArray());}
+    Bot(Store store,LpaClient adapter,NativeSims subscriptions) {s=store;lpa=adapter;sims=subscriptions;}
     private final java.util.Map<Long,Long> prompts=new java.util.LinkedHashMap<>();
     static JSONObject button(String text,String data) throws Exception {return new JSONObject().put("text",text).put("callback_data",data);}
     static JSONObject keyboard(JSONObject... buttons) throws Exception {
@@ -85,6 +86,8 @@ final class Bot {
             if(data.equals("last")){ recent(t,m);return; }
             if(data.equals("test")){t.send(replyTo(),"✅ Бот отвечает. Телефон: "+s.get("device_status","")+"\nПересылка SMS: "+(s.enabled()?"включена":"выключена — проверь разрешение SMS на Android"),null);return;}
             if(data.equals("profiles")){ profiles(t,m);return; }
+            if(data.equals("adapter")){adapterProfiles(t,m);return;}
+            if(data.startsWith("physical:")){physicalNumber(t,m,Integer.parseInt(data.substring(9)));return;}
             if(data.equals("add")){beginAdd(t,m);return;}
             if(data.equals("cancel")){s.put(draftKey(),"{}");menu(t,m);return;}
             if(data.startsWith("confirm:")){confirm(t,m,data.substring(8));return;}
@@ -102,6 +105,11 @@ final class Bot {
         if(stage.equals("phone")) {
             d.put("number",Rules.phone(text)).put("stage","qr");s.put(draftKey(),d.toString());
             t.send(replyTo(),"Номер сохранён: "+d.getString("number")+"\nТеперь пришли QR-код картинкой или строку LPA:1$… от оператора.\nЕсли нужен PIN оператора, его можно добавить командой /pin 1234 перед подтверждением.",keyboard(button("Отмена","cancel")));return;
+        }
+        if(stage.equals("physical_phone")) {
+            int id=d.getInt("sub");requireSim(id);String n=Rules.phone(text);
+            s.number("physical:"+id,n);s.put(draftKey(),"{}");
+            t.send(replyTo(),"Номер SIM сохранён: "+n,null);profiles(t,null);return;
         }
         if(stage.equals("rename_phone")) {
             String n=Rules.phone(text);s.number(d.getString("key"),n);s.put(draftKey(),"{}");t.send(replyTo(),"Номер профиля сохранён: "+n,null);profiles(t,null);return;
@@ -132,7 +140,37 @@ final class Bot {
         JSONObject card=lpa.card();JSONObject d=newDraft("phone").put("eid",card.getString("eid"));s.put(draftKey(),d.toString());
         show(t,m,"Добавление eSIM\nСначала введи номер этой eSIM с кодом страны, например +79991234567.\nНомер ты задаёшь сам; он будет подписывать SMS этого профиля.",keyboard(button("Отмена","cancel")));
     }
+    private JSONObject requireSim(int id) throws Exception {
+        JSONArray list=sims.list();for(int i=0;i<list.length();i++)if(list.getJSONObject(i).getInt("id")==id)return list.getJSONObject(i);
+        throw new UserError("SIM-карта больше не активна. Обнови список SIM-карт.");
+    }
+    private void physicalNumber(Telegram t,JSONObject m,int id) throws Exception {
+        JSONObject sim=requireSim(id);
+        if(s.get("esim_control","false").equals("true") && s.get("adapter_slot","-1").equals(""+sim.getInt("slot")))
+            throw new UserError("Для управляемого адаптера номер задаётся отдельно каждому профилю в разделе 9eSIM.");
+        s.put(draftKey(),newDraft("physical_phone").put("sub",id).toString());
+        show(t,m,"Введи номер SIM в слоте "+(sim.getInt("slot")+1)+", начиная с + и кода страны. Например +79991234567.",keyboard(button("Отмена","cancel")));
+    }
     private void profiles(Telegram t,JSONObject m) throws Exception {
+        JSONArray list=sims.list(),rows=new JSONArray();StringBuilder text=new StringBuilder("Мои SIM-карты\n");
+        if(list.length()==0)text.append("\nAndroid не видит активных SIM. Проверь, что карта вставлена и включена в настройках телефона.\n");
+        for(int i=0;i<list.length();i++) {
+            JSONObject sim=list.getJSONObject(i);int id=sim.getInt("id"),slot=sim.getInt("slot");
+            boolean managed=s.get("esim_control","false").equals("true") && s.get("adapter_slot","-1").equals(""+slot);
+            text.append("\nСлот ").append(slot+1).append(" · ").append(sim.optString("name")).append("\n")
+                .append(managed?"Номер активного профиля: "+s.recipient(slot,id):s.number("physical:"+id)).append("\n");
+            if(!managed)rows.put(new JSONArray().put(button("Задать номер · слот "+(slot+1),"physical:"+id)));
+        }
+        text.append("\nПриём SMS работает без приложения 9eSIM. Номер задаёшь ты; Android не всегда сообщает его.");
+        rows.put(new JSONArray().put(button("Обновить SIM-карты","profiles")));
+        rows.put(new JSONArray().put(button("9eSIM · дополнительно","adapter")));
+        rows.put(new JSONArray().put(button("Назад","menu")));
+        show(t,m,text.toString(),new JSONObject().put("inline_keyboard",rows));
+    }
+    private void adapterProfiles(Telegram t,JSONObject m) throws Exception {
+        if(!s.get("esim_control","false").equals("true") || !lpa.installed()) {
+            show(t,m,"9eSIM — дополнительная функция.\nДля обычных SIM и пересылки SMS этот компонент не нужен.\nУправление профилями требует совместимого компонента 9eSIM и включения в настройках Android.",keyboard(button("Мои SIM-карты","profiles")));return;
+        }
         JSONObject card=lpa.card();JSONArray ps=lpa.profiles(card.getInt("slot"),card.optInt("port",0));
         String nonce=UUID.randomUUID().toString().replace("-","");
         JSONObject cache=new JSONObject().put("eid",card.getString("eid")).put("profiles",ps).put("nonce",nonce).put("expires",System.currentTimeMillis()+10*60000L);
@@ -183,7 +221,7 @@ final class Bot {
             for(int i=0;i<ps.length();i++) {JSONObject p=ps.getJSONObject(i);if(p.optString("iccid").equals(iccid)&&p.optBoolean("enabled"))active=true;}
             if(!active)throw new UserError("Профиль сохранён, но активация не подтверждена. Проверь список eSIM.");
             s.put("switching","false");refreshed=true;s.put("last_install","{}");
-            t.send(replyTo(),"🟢 Активирован профиль "+number+".\nВ новых SMS будет указан этот номер.",keyboard(button("Номера и eSIM","profiles")));
+            t.send(replyTo(),"🟢 Активирован профиль "+number+".\nВ новых SMS будет указан этот номер.",keyboard(button("Мои SIM-карты","profiles")));
         } finally {
             if(!refreshed) {s.clearActive();s.put("error","eSIM: проверь состояние профилей после незавершённой операции");}
         }
@@ -199,7 +237,7 @@ final class Bot {
         p.put("reply_markup",keyboard==null?new JSONObject().put("inline_keyboard",new JSONArray()):keyboard);
         try {t.call("editMessageText",p);}catch(Telegram.ApiError e){if(e.code!=400)throw e;}
     }
-    private void menu(Telegram t,JSONObject m) throws Exception {show(t,m,"SMS Мост\n"+status(),keyboard(button("Проверить связь","test"),button("Статус телефона","status"),button("Последние SMS","last"),button("Номера и eSIM","profiles")));}
+    private void menu(Telegram t,JSONObject m) throws Exception {show(t,m,"SMS Мост\n"+status(),keyboard(button("Проверить связь","test"),button("Статус телефона","status"),button("Последние SMS","last"),button("Мои SIM-карты","profiles")));}
     private String status() {return "Телефон на связи\nПересылка: "+(s.enabled()?"включена":"выключена")+"\nОтправлено сегодня: "+s.today()+"\nВ очереди: "+s.pending()+"\n"+s.get("device_status","");}
     private void recent(Telegram t,JSONObject m) throws Exception {
         StringBuilder b=new StringBuilder("Последние SMS\n");JSONArray rows=s.recent(replyTo());

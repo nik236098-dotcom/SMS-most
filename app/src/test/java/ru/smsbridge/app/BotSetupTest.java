@@ -15,7 +15,7 @@ public class BotSetupTest {
     Store s;Telegram api;Bot bot;Map<String,String> values;long owner;
     @Before public void setup() throws Exception {
         s=mock(Store.class);api=mock(Telegram.class);values=new HashMap<>();owner=0;
-        when(s.running()).thenReturn(true);when(s.enabled()).thenReturn(false);
+        when(s.epoch()).thenReturn("test-session");when(s.running()).thenReturn(true);when(s.enabled()).thenReturn(false);
         when(s.chat()).thenAnswer(i->owner);
         when(s.chats()).thenAnswer(i->owner==0?java.util.Collections.emptyList():java.util.Collections.singletonList(owner));
         when(s.get(anyString(),anyString())).thenAnswer(i->values.getOrDefault(i.getArgument(0),i.getArgument(1)));
@@ -81,4 +81,38 @@ public class BotSetupTest {
         assertTrue(Telegram.safe(new java.net.SocketTimeoutException()).contains("api.telegram.org"));
         assertTrue(Telegram.safe(new java.net.UnknownHostException()).contains("DNS"));
     }
+    @Test public void simListWorksWithoutAdapterComponent() throws Exception {
+        owner=456;LpaClient adapter=mock(LpaClient.class);
+        when(s.number("physical:7")).thenReturn("+79991234567");
+        bot=new Bot(s,adapter,()->new JSONArray().put(new JSONObject().put("id",7).put("slot",0).put("name","Carrier")));
+        updates(message("/profiles",456,"private"));bot.poll(api,0);
+        verify(api).send(eq(456L),contains("+79991234567"),notNull());verifyNoInteractions(adapter);
+    }
+    @Test public void optionalAdapterDoesNotBlockSimMenu() throws Exception {
+        owner=456;LpaClient adapter=mock(LpaClient.class);bot=new Bot(s,adapter);
+        JSONObject update=callback("adapter");updates(update);bot.poll(api,0);
+        verify(api).call(eq("editMessageText"),argThat(p->p.optString("text").contains("Для обычных SIM")));
+        verify(adapter,never()).card();
+    }
+    private JSONObject callback(String data) throws Exception {
+        JSONObject original=message("",456,"private");JSONObject m=original.getJSONObject("message");
+        return new JSONObject().put("update_id",102).put("callback_query",new JSONObject().put("id","cb")
+            .put("data",data).put("message",m).put("from",m.getJSONObject("from")));
+    }
+    @Test public void physicalSimNumberCanBeSetFromTelegramWithoutAdapter() throws Exception {
+        owner=456;LpaClient adapter=mock(LpaClient.class);
+        NativeSims sims=()->new JSONArray().put(new JSONObject().put("id",7).put("slot",0).put("name","Carrier"));
+        bot=new Bot(s,adapter,sims);updates(callback("physical:7"));bot.poll(api,0);
+        updates(message("+79991234567",456,"private"));bot.poll(api,0);
+        verify(s).number("physical:7","+79991234567");verifyNoInteractions(adapter);
+    }
+    @Test public void removedSimCannotReceiveStaleNumberAssignment() throws Exception {
+        owner=456;NativeSims sims=mock(NativeSims.class);
+        when(sims.list()).thenReturn(new JSONArray().put(new JSONObject().put("id",7).put("slot",0)),new JSONArray());
+        bot=new Bot(s,mock(LpaClient.class),sims);updates(callback("physical:7"));bot.poll(api,0);
+        updates(message("+79991234567",456,"private"));bot.poll(api,0);
+        verify(s,never()).number(anyString(),anyString());
+        verify(api).send(eq(456L),contains("больше не активна"),isNull());
+    }
+
 }

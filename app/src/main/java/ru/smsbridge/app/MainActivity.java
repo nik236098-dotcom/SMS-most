@@ -86,7 +86,8 @@ public final class MainActivity extends Activity {
             if(!failure.isEmpty())s.put("error",failure+". Каждый получатель должен нажать «Начать» в боте.");
             return "Тест отправлен: "+sent+" из "+s.chats().size();
         },this::toast);});
-        button(root,"Номер SIM и настройки",false,this::settings);
+        button(root,"Мои SIM-карты",false,this::physical);
+        button(root,"Настройки",false,this::settings);
         button(root,"Последние SMS и очередь",false,this::history);
         label(root,"При работе отображается постоянное уведомление. После настройки приложение можно закрыть.",13,false);refresh();
     }
@@ -141,28 +142,36 @@ public final class MainActivity extends Activity {
         page("Настройки","Телефон остаётся дома на Wi-Fi и зарядке");
         button(root,"Токен и подключение Telegram",true,this::home);
         button(root,"Разрешения SMS и запуск",false,()->{if(s.get("token","").isEmpty()){home();toast("Сначала введи токен бота");}else permissions();});
-        CheckBox control=new CheckBox(this);control.setText("Разрешить управление моим адаптером 9eSIM из привязанного Telegram-чата");control.setTextColor(Color.WHITE);control.setChecked(s.get("esim_control","false").equals("true"));root.addView(control);
-        control.setOnCheckedChangeListener((b,on)->{s.put("esim_control",""+on);if(!on)s.clearActive();});
-        label(root,new LpaClient(this).installed()?"Компонент 9eSIM обнаружен":"Компонент 9eSIM не установлен. Установка профилей пока недоступна.",14,false);
-        button(root,"Проверить адаптер",false,()->background(()->{LpaClient l=new LpaClient(this);JSONObject c=l.card();l.refresh(s);return "Адаптер обнаружен, слот "+(c.getInt("slot")+1);},this::toast));
-        button(root,"Задать номер физической SIM",false,this::physical);
+        button(root,"Мои SIM-карты",false,this::physical);
+        button(root,"9eSIM · дополнительно",false,this::adapterSettings);
         button(root,"Настройки батареи",false,()->{try{startActivity(new Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS));}catch(Exception e){appSettings();}});
         button(root,"Разрешения приложения",false,this::appSettings);
         label(root,"На Xiaomi: разреши автозапуск и выбери режим батареи «Без ограничений». После перезагрузки разблокируй телефон один раз.",14,false);
         button(root,"Удалить неотправленную очередь",false,()->new AlertDialog.Builder(this).setTitle("Удалить очередь?").setMessage("Неотправленные SMS будут удалены без отправки.").setNegativeButton("Отмена",null).setPositiveButton("Удалить",(d,w)->{s.purgeQueue();toast("Очередь удалена");}).show());
         button(root,"Назад",false,this::home);
     }
+    private void adapterSettings() {
+        page("9eSIM · дополнительно","Обычные SIM и пересылка SMS работают без этого компонента");
+        CheckBox control=new CheckBox(this);control.setText("Разрешить управление моим адаптером 9eSIM из привязанного Telegram-чата");control.setTextColor(Color.WHITE);control.setChecked(s.get("esim_control","false").equals("true"));root.addView(control);
+        control.setOnCheckedChangeListener((b,on)->{s.put("esim_control",""+on);if(!on)s.clearActive();});
+        label(root,new LpaClient(this).installed()?"Компонент 9eSIM обнаружен":"Компонент 9eSIM не установлен. Установка профилей пока недоступна.",14,false);
+        button(root,"Проверить адаптер",false,()->background(()->{LpaClient l=new LpaClient(this);JSONObject c=l.card();l.refresh(s);return "Адаптер обнаружен, слот "+(c.getInt("slot")+1);},this::toast));
+        button(root,"Назад",false,this::settings);
+    }
     private void physical() {
         if(checkSelfPermission(Manifest.permission.READ_PHONE_STATE)!=PackageManager.PERMISSION_GRANTED){requestPermissions(new String[]{Manifest.permission.READ_PHONE_STATE},42);toast("После выдачи разрешения открой эту страницу ещё раз");return;}
-        page("Номер физической SIM","Для eSIM номер вводится при добавлении профиля в боте");
+        page("Мои SIM-карты","SIM определяются Android. Для пересылки SMS компонент 9eSIM не нужен.");
         try {List<SubscriptionInfo> list=getSystemService(SubscriptionManager.class).getActiveSubscriptionInfoList();
             if(list==null||list.isEmpty())label(root,"Активных SIM пока нет",16,false);
             else for(SubscriptionInfo info:list) {
-                if(s.get("adapter_slot","-1").equals(""+info.getSimSlotIndex()))continue;
+                if(s.get("esim_control","false").equals("true") && s.get("adapter_slot","-1").equals(""+info.getSimSlotIndex())) {
+                    label(root,"Слот "+(info.getSimSlotIndex()+1)+" · управляемый адаптер 9eSIM. Номер задаётся каждому профилю в разделе 9eSIM.",16,false);continue;
+                }
                 label(root,"Слот "+(info.getSimSlotIndex()+1)+" · "+info.getDisplayName(),17,true);
                 EditText e=input("+79991234567",false);String current=s.number("physical:"+info.getSubscriptionId());if(!current.equals("Номер не задан"))e.setText(current);
                 button(root,"Сохранить номер слота "+(info.getSimSlotIndex()+1),true,()->{try{s.number("physical:"+info.getSubscriptionId(),e.getText().toString());toast("Номер сохранён");}catch(Exception ex){toast(Telegram.safe(ex));}});
-            }}catch(Exception e){toast("Не удалось прочитать SIM");}button(root,"Назад",false,this::settings);
+            }}catch(Exception e){label(root,"Не удалось прочитать SIM: проверь разрешение «Телефон» в настройках приложения.",16,false);}
+        button(root,"Обновить SIM-карты",false,this::physical);button(root,"Назад",false,this::home);
     }
     private void appSettings(){startActivity(new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,Uri.parse("package:"+getPackageName())));}
     private interface Task {String run() throws Exception;}

@@ -114,6 +114,7 @@ final class Store extends SQLiteOpenHelper {
         getWritableDatabase().insertWithOnConflict("active", null, cv, SQLiteDatabase.CONFLICT_REPLACE);
     }
     synchronized String recipient(int slot, int subId) throws Exception {
+        if (!get("esim_control", "false").equals("true")) return number("physical:"+subId);
         if (get("switching", "false").equals("true")) return "Номер не определён: переключение eSIM";
         try (Cursor c = getReadableDatabase().rawQuery("SELECT profile,observed FROM active WHERE slot=?", new String[]{""+slot})) {
             if (c.moveToFirst()) {
