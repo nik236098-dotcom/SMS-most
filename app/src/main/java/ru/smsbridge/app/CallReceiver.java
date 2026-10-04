@@ -34,7 +34,8 @@ public final class CallReceiver extends BroadcastReceiver {
                             if((slot>=0&&slot==info.getSimSlotIndex())||(slot<0&&active.size()==1)) {sub=info.getSubscriptionId();slot=info.getSimSlotIndex();break;}
                     }
                 }
-            } catch(Exception e) {store.put("call_sim_warning","Не удалось уточнить SIM звонка ("+e.getClass().getSimpleName()+")");}
+            } catch(SecurityException e) {store.put("call_sim_warning","Нет доступа к сведениям SIM звонка (SecurityException)");}
+              catch(Exception e) {store.put("call_sim_warning","Не удалось уточнить SIM звонка ("+e.getClass().getSimpleName()+")");}
             String key="call_state:"+(sub>=0?"sub:"+sub:slot>=0?"slot:"+slot:"unknown");
             synchronized(store) {
                 JSONObject old=new JSONObject(store.get(key,"{}"));
