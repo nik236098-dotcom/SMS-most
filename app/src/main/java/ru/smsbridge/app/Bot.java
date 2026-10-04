@@ -245,9 +245,12 @@ final class Bot {
             .append(Rules.service(p.optString("sender"))).append(" · ").append(p.optString("state").equals("sent")?"Доставлено":"В очереди").append("\n");}
         show(t,m,b.toString(),keyboard(button("Назад","menu")));
     }
-    static String format(JSONObject p) {
+    static String header(JSONObject p) {
         return "📩 Новое SMS #"+p.optLong("id")+"\n\n📲 На номер: "+p.optString("recipient","Номер не определён")+"\n🏷 Сервис: "+Rules.service(p.optString("sender"))+
-            "\nОтправитель: "+p.optString("sender")+"\n\n"+p.optString("body")+"\n\n🕒 Получено: "+new SimpleDateFormat("dd.MM.yyyy HH:mm:ss",Locale.forLanguageTag("ru")).format(new Date(p.optLong("received")));
+            "\nОтправитель: "+p.optString("sender")+"\n\n";
+    }
+    static String format(JSONObject p) {
+        return header(p)+p.optString("body")+"\n\n🕒 Получено: "+new SimpleDateFormat("dd.MM.yyyy HH:mm:ss",Locale.forLanguageTag("ru")).format(new Date(p.optLong("received")));
     }
     private String decode(byte[] raw) throws Exception {
         BitmapFactory.Options options=new BitmapFactory.Options();options.inJustDecodeBounds=true;BitmapFactory.decodeByteArray(raw,0,raw.length,options);
