@@ -15,6 +15,7 @@ p=vendor/'app-deps/build.gradle.kts';s=p.read_text();s=re.sub(r'import org.linea
 p=vendor/'app-unpriv/build.gradle.kts';s=p.read_text().replace('applicationId = "im.angry.easyeuicc"','applicationId = "ru.smsbridge.app"\n        versionCode = 7\n        versionName = "0.7.0"\n        buildConfigField("String", "LPA_SIGNER_SHA256", "\\\"\\\"")')
 s=s.replace('android {','android {\n    buildFeatures { buildConfig = true }',1)
 s=s.replace('plugin<MyVersioningPlugin>()','').replace('JavaVersion.VERSION_1_8','JavaVersion.VERSION_17').replace('jvmTarget = "1.8"','jvmTarget = "17"')
+s=s.replace('versionNameSuffix = "-unpriv"','versionNameSuffix = ""')
 s=s.replace('    implementation(project(":app-common"))','''    implementation(project(":app-common"))
     implementation("com.google.zxing:core:3.5.3")
     testImplementation("junit:junit:4.13.2")
@@ -32,6 +33,10 @@ gateway=vendor/'app-unpriv/src/main/java/ru/smsbridge/adapter';gateway.mkdir(par
 shutil.copy2(base/'adapter/GatewayProvider.kt',gateway/'GatewayProvider.kt')
 shutil.copytree(base/'app/src/main/res',vendor/'app-unpriv/src/main/res',dirs_exist_ok=True)
 shutil.copytree(base/'app/src/test',vendor/'app-unpriv/src/test',dirs_exist_ok=True)
+# Complete two upstream translations so lint checks stay enabled for this build.
+for locale,toolkit,slot in [('ja','SIMツールキット','SIMツールキット #%d'),('zh','SIM 工具包','SIM 工具包 #%d')]:
+ p=vendor/'app-unpriv/src/main/res'/('values-'+locale)/'sms_bridge_translations.xml';p.parent.mkdir(parents=True,exist_ok=True)
+ p.write_text('<resources><string name="shortcut_sim_toolkit">'+toolkit+'</string><string name="shortcut_sim_toolkit_with_slot">'+slot+'</string></resources>')
 ns='http://schemas.android.com/apk/res/android';tools='http://schemas.android.com/tools'
 ET.register_namespace('android',ns);ET.register_namespace('tools',tools);a='{'+ns+'}'
 p=vendor/'app-unpriv/src/main/AndroidManifest.xml';xml=ET.parse(p);root=xml.getroot();app=root.find('application')
@@ -43,6 +48,8 @@ for activity in app.findall('activity'):
 relay=ET.parse(base/'app/src/main/AndroidManifest.xml').getroot()
 for permission in relay.findall('uses-permission'):
  if not any(n.get(a+'name')==permission.get(a+'name') for n in root.findall('uses-permission')):root.insert(0,permission)
+for feature in relay.findall('uses-feature'):
+ if not any(n.get(a+'name')==feature.get(a+'name') for n in root.findall('uses-feature')):root.insert(0,feature)
 for item in relay.find('application'):
  if item.tag not in ('activity','service','receiver'):continue
  name=item.get(a+'name')
