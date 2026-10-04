@@ -7,6 +7,7 @@ on:
       - 'adapter/**'
       - 'tools/build_unified.py'
       - 'tools/patch_profile_delete.py'
+      - 'tools/test_native_profile_read.py'
       - '.github/workflows/unified.yml'
   workflow_dispatch:
 permissions:

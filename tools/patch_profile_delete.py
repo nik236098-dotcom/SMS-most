@@ -21,3 +21,18 @@ def patch_service(source):
     assert source.count(old) == 1, 'Pinned switch operation changed'
     source = source.replace(old, '                        if (expectedEid != null)check(channel.lpa.eID == expectedEid) { "Adapter changed" }\n'+old)
     return source
+
+def patch_profile_read(source):
+    # Upstream maps both read failure and a genuinely empty card to a null list.
+    # A failed read must never be treated as proof that deletion succeeded.
+    old = '''    if (es10c_get_profiles_info(ctx, &info) < 0) {
+        return 0;
+    }'''
+    assert source.count(old) == 1, 'Pinned profile-list JNI changed'
+    return source.replace(old, '''    if (es10c_get_profiles_info(ctx, &info) < 0) {
+        jclass exception = (*env)->FindClass(env, "java/lang/IllegalStateException");
+        if (exception != NULL) {
+            (*env)->ThrowNew(env, exception, "Unable to read eSIM profile list");
+        }
+        return 0;
+    }''')

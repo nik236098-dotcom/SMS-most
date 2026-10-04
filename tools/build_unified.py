@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Build one APK from pinned OpenEUICC source and our SMS relay, without injecting binaries."""
 import pathlib,subprocess,shutil,xml.etree.ElementTree as ET,tarfile,re,json
-from patch_profile_delete import patch_service
+from patch_profile_delete import patch_service,patch_profile_read
 base=pathlib.Path(__file__).resolve().parents[1]
 vendor=base/'vendor'/'openeuicc'
 ref='f17e1713722b89da0234954d9beb81ec77c5005e'
@@ -63,6 +63,8 @@ xml.write(p,encoding='utf-8',xml_declaration=True)
 p=vendor/'libs/lpac-jni/src/main/java/net/typeblog/lpac_jni/impl/HttpInterfaceImpl.kt';s=p.read_text().replace('conn.connectTimeout = 2000','conn.connectTimeout = 15000\n            conn.readTimeout = 45000');p.write_text(s)
 # Test and build the exact unified Java + Kotlin sources, native lpac included.
 p=vendor/'app-common/src/main/java/im/angry/openeuicc/service/EuiccChannelManagerService.kt';p.write_text(patch_service(p.read_text()))
+p=vendor/'libs/lpac-jni/src/main/jni/lpac-jni/lpac-jni.c';p.write_text(patch_profile_read(p.read_text()))
+run(['python3',base/'tools/test_native_profile_read.py',p])
 run(['bash','gradlew',':app-unpriv:assembleRelease',':app-unpriv:testReleaseUnitTest',':app-unpriv:lintRelease','--no-daemon'],vendor)
 dist=base/'dist';dist.mkdir(exist_ok=True)
 output=vendor/'app-unpriv/build/outputs/apk/release'
