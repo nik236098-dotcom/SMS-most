@@ -1,0 +1,14 @@
+Проверка исходников 2026-10-04
+
+Команда: bash tools/test_core.sh
+Passed 36 core checks
+Syntax parsed: 14 Java files (no Android type checking)
+Syntax parsed: 3 Java files (no Android type checking)
+Manifest, resources and permission checks passed
+Python-скрипты прошли py_compile. Workflow YAML разобран PyYAML.
+
+НЕ ВЫПОЛНЕНЫ: Android assemble/lint, установка APK, проверка интерфейса на
+Xiaomi, Telegram с реальным ботом, приём SMS, сборка LPA-компонента,
+авторизация Community Key на 9eSIM V0, загрузка и переключение eSIM.
+Причина: нет Android SDK и доступного скачивания зависимостей в этой среде;
+адаптер пользователя ещё не получен. Архив содержит исходники, а не APK.
