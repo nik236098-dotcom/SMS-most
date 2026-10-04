@@ -46,6 +46,9 @@ public final class SmsReceiver extends BroadcastReceiver {
                 .put("recipient",recipient).put("received",now).put("network_time",networkTime).put("sub_id",sub).put("slot",slot));
             if(id>=0)s.put("sms_last_saved",""+now);
             s.put("sms_result",id>=0?"SMS сохранено в очередь Telegram":"Повтор уже сохранённого SMS");
+            // Receiving a system broadcast does not imply that the delivery service is alive.
+            // A rejected foreground start must not undo the saved message.
+            try {RelayService.start(c);}catch(RuntimeException ignored) { /* start records the reason; periodic retry remains scheduled */ }
         } catch(Exception e) {
             // Keep capture errors separate: successful Telegram delivery must not erase them.
             s.put("sms_receive_error","Не удалось сохранить SMS ("+e.getClass().getSimpleName()+"). Проверь свободное место.");

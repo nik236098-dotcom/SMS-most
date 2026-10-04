@@ -20,7 +20,7 @@ import static org.mockito.ArgumentMatchers.*;
 
 /** Real receiver + real permission gate; only Android and persistence are test doubles. */
 public class SmsReceiverTest {
-    Store s;Context context;Intent intent;Map<String,String> settings;
+    Store s;Context context;Intent intent;Map<String,String> settings;boolean rejectService;int serviceRequests;
     @Before public void setup() throws Exception {
         s=mock(Store.class);context=mock(Context.class);intent=mock(Intent.class);settings=new HashMap<>();
         settings.put("token","configured-test-token");settings.put("bot_enabled","true");settings.put("enabled","false");
@@ -37,7 +37,9 @@ public class SmsReceiverTest {
         when(p.getOriginatingAddress()).thenReturn("Service");when(p.getTimestampMillis()).thenReturn(1720000000000L);return p;
     }
     private void receive(SmsMessage... parts) {
-        try(MockedStatic<BridgeApp> app=mockStatic(BridgeApp.class);MockedStatic<Telephony.Sms.Intents> sms=mockStatic(Telephony.Sms.Intents.class)) {
+        try(MockedStatic<BridgeApp> app=mockStatic(BridgeApp.class);MockedStatic<Telephony.Sms.Intents> sms=mockStatic(Telephony.Sms.Intents.class);
+            MockedStatic<RelayService> relay=mockStatic(RelayService.class)) {
+            relay.when(()->RelayService.start(context)).thenAnswer(i->{serviceRequests++;if(rejectService)throw new IllegalStateException("background restricted");return null;});
             app.when(BridgeApp::store).thenReturn(s);sms.when(()->Telephony.Sms.Intents.getMessagesFromIntent(intent)).thenReturn(parts);
             new SmsReceiver().onReceive(context,intent);
         }
@@ -49,6 +51,7 @@ public class SmsReceiverTest {
         assertEquals("false",settings.get("enabled"));assertTrue(s.enabled());
         receive(part("Код 012345"));assertEquals("Код 012345",saved().getString("body"));
         assertTrue(settings.containsKey("sms_last_saved"));assertTrue(settings.get("sms_result").contains("сохранено"));
+        assertEquals(1,serviceRequests);
     }
     @Test public void livePermissionChangesAreObservedWithoutRestartingBot() {
         when(s.smsPermission()).thenReturn(false);assertFalse(s.enabled());
@@ -59,6 +62,7 @@ public class SmsReceiverTest {
         settings.put("bot_enabled","false");settings.put("enabled","true");assertFalse(s.enabled());
         receive(part("Test"));verify(s,never()).enqueue(anyString(),any());
         assertTrue(settings.get("sms_result").contains("остановлен"));
+        assertEquals(0,serviceRequests);
     }
     @Test public void revokedPermissionDoesNotTrustOldEnabledFlag() throws Exception {
         settings.put("enabled","true");when(s.smsPermission()).thenReturn(false);assertFalse(s.enabled());
@@ -97,6 +101,13 @@ public class SmsReceiverTest {
         receive(part("secret"));assertFalse(settings.containsKey("sms_last_saved"));
         s.put("error","");String report=SmsDiagnostics.report(s);
         assertTrue(report.contains("IllegalStateException"));assertFalse(report.contains("sensitive message"));assertFalse(report.contains("secret"));
+        assertEquals(0,serviceRequests);
+    }
+    @Test public void blockedForegroundRestartDoesNotUndoCapturedSms() throws Exception {
+        rejectService=true;receive(part("saved despite stopped service"));
+        assertEquals("saved despite stopped service",saved().getString("body"));
+        assertTrue(settings.containsKey("sms_last_saved"));assertTrue(settings.get("sms_receive_error").isEmpty());
+        assertEquals(1,serviceRequests);
     }
     @Test public void repeatIsDistinguishedFromNewlySavedSms() throws Exception {
         when(s.enqueue(anyString(),any())).thenReturn(-1L);receive(part("repeat"));

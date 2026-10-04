@@ -10,10 +10,16 @@ final class SmsDiagnostics {
         String result="Разрешение SMS: "+(s.smsPermission()?"есть":"нет")
             +"\nПриём SMS: "+(!s.running()?"остановлен":s.enabled()?"включён":"нужно разрешение Android")
             +"\nСигнал о новом SMS: "+time(s.get("sms_last_broadcast","0"))
-            +"\nПоследнее сохранение: "+time(s.get("sms_last_saved","0"));
+            +"\nПоследнее сохранение: "+time(s.get("sms_last_saved","0"))
+            +"\nРабота сервиса: "+time(s.get("service_last_work","0"))
+            +"\nЗапрос запуска сервиса: "+time(s.get("service_last_request","0"))
+            +"\nРезервная отправка: "+time(s.get("service_last_retry","0"));
         String state=s.get("sms_result","");if(!state.isEmpty())result+="\n"+state;
         String warning=s.get("sms_sim_warning","");if(!warning.isEmpty())result+="\n"+warning;
         String error=s.get("sms_receive_error","");if(!error.isEmpty())result+="\nОшибка приёма: "+error;
+        for(String key:new String[]{"service_start_error","service_schedule_error"}) {
+            String failure=s.get(key,"");if(!failure.isEmpty())result+="\n"+failure;
+        }
         return result;
     }
     private static String time(String value) {
