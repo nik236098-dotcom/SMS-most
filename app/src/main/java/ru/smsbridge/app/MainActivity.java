@@ -39,9 +39,9 @@ public final class MainActivity extends Activity {
     private Store s;private LinearLayout root;private final ExecutorService worker=Executors.newSingleThreadExecutor();
     private final Handler handler=new Handler(Looper.getMainLooper());private boolean alive=true,homeVisible;
     private TextView status,stats,connection,error;
-    private Button relayToggle;
+    private Button relayToggle; private TextView setupLabel; private EditText tokenInput,idInput; private boolean launching;
     private final Runnable ticker=new Runnable(){public void run(){if(alive){if(homeVisible)refresh();handler.postDelayed(this,3000);}}};
-    @Override public void onCreate(Bundle b){super.onCreate(b);s=BridgeApp.store();home();handler.post(ticker);}
+    @Override public void onCreate(Bundle b){super.onCreate(b);s=BridgeApp.store();if(s.running())try{RelayService.start(this);}catch(Exception e){s.put("bot_error",Telegram.safe(e));}home();handler.post(ticker);}
     private int dp(int n){return (int)(n*getResources().getDisplayMetrics().density+.5f);}
     private GradientDrawable shape(int color){GradientDrawable d=new GradientDrawable();d.setColor(color);d.setCornerRadius(dp(18));return d;}
     private void page(String title,String subtitle) {
@@ -68,26 +68,49 @@ public final class MainActivity extends Activity {
         LinearLayout.LayoutParams lp=new LinearLayout.LayoutParams(-1,-2);lp.topMargin=dp(12);root.addView(e,lp);return e;
     }
     private void home() {
-        page("SMS Мост","SMS автоматически в Telegram");homeVisible=true;
-        LinearLayout state=card();status=label(state,"",21,true);
-        relayToggle=button(state,s.enabled()?"Остановить пересылку":"Включить пересылку",true,()->{if(s.enabled())stop();else consent();});
-        LinearLayout telegram=card();label(telegram,"Telegram",17,true);connection=label(telegram,"",15,false);
-        stats=label(card(),"",22,true);error=label(root,"",14,false);error.setTextColor(Color.rgb(255,196,105));
-        button(root,"Отправить тест",true,()->{if(!s.enabled()){toast("Сначала включи пересылку");return;}background(()->{
-            s.enqueue(UUID.randomUUID().toString(),new JSONObject().put("recipient","Тест приложения").put("sender","SMS Мост").put("body","Пересылка в Telegram настроена. Это тест, не реальное SMS.").put("received",System.currentTimeMillis()));Outbox.drain(this);return "Тест добавлен в очередь";
+        page("SMS Мост","Бот работает с этого телефона · сервер не нужен");homeVisible=true;
+        tokenInput=input("Вставь токен из @BotFather",true);tokenInput.setText(s.get("token",""));
+        idInput=input("Твой Telegram ID — число, например 123456789",false);idInput.setInputType(InputType.TYPE_CLASS_NUMBER);
+        if(s.chat()>0)idInput.setText(""+s.chat());
+        label(root,"Укажи ID того, кто будет получать SMS. Бот будет отвечать только этому аккаунту. После запуска напиши боту /start со своего Telegram. Telegram на Android открывать не нужно. Если ID неизвестен, оставь поле пустым — подключение по коду.",14,false);
+        relayToggle=button(root,s.running()?"Остановить бота":"Запустить бота",true,()->{if(s.running())stop();else launch();});
+        LinearLayout state=card();status=label(state,"",20,true);connection=label(state,"",15,false);setupLabel=label(state,"",18,true);
+        button(state,"Скопировать данные подключения",false,()->{
+            String text="Бот: @"+s.get("bot_username","")+"\nКод: "+(s.chat()==0?s.setupCode():"Получатель уже подключён");
+            getSystemService(ClipboardManager.class).setPrimaryClip(ClipData.newPlainText("SMS Мост",text));toast("Скопировано — передай получателю SMS");
+        });
+        stats=label(card(),"",20,true);error=label(root,"",14,false);error.setTextColor(Color.rgb(255,196,105));
+        button(root,"Отправить тест в Telegram",true,()->{if(s.chat()==0){toast("Сначала отправь код боту со своего Telegram");return;}if(!s.running()){toast("Сначала запусти бота");return;}background(()->{
+            new Telegram(s.get("token","")).send(s.chat(),"✅ Телефон подключён. Это тест SMS Мост.\nПересылка SMS: "+(s.enabled()?"включена":"нет разрешения на SMS — открой настройки Android"),null);return "Тест отправлен";
         },this::toast);});
+        button(root,"Номер SIM и настройки",false,this::settings);
         button(root,"Последние SMS и очередь",false,this::history);
-        button(root,"Номера и настройки",false,this::settings);
-        label(root,"При работе отображается постоянное уведомление. Можно закрыть приложение.",13,false);refresh();
+        label(root,"При работе отображается постоянное уведомление. После настройки приложение можно закрыть.",13,false);refresh();
     }
-    private void refresh(){status.setText(s.enabled()?"🟢 Пересылка включена":"Пересылка выключена");connection.setText(s.chat()>0?s.get("chat_name","Личный чат"):"Не подключён");
-        relayToggle.setText(s.enabled()?"Остановить пересылку":"Включить пересылку");
-        stats.setText("Отправлено сегодня: "+s.today()+"\nВ очереди: "+s.pending());error.setText(s.get("error",""));}
-    private void consent() {
-        if(s.chat()==0){pair();return;}
-        new AlertDialog.Builder(this).setTitle("Включить пересылку?")
-            .setMessage("Все новые входящие SMS с этого телефона будут автоматически отправляться в Telegram-чат «"+s.get("chat_name","")+"».\n\nРазрешения выдаёт владелец телефона. Остановить пересылку можно здесь или через постоянное уведомление.")
-            .setNegativeButton("Отмена",null).setPositiveButton("Включить",(d,w)->permissions()).show();
+    private void refresh(){
+        boolean running=s.running();status.setText(running?"Бот запущен":"Бот остановлен");
+        relayToggle.setText(launching?"Проверяем Telegram…":running?"Остановить бота":"Запустить бота");relayToggle.setEnabled(!launching);
+        String username=s.get("bot_username","");
+        connection.setText((username.isEmpty()?"Токен ещё не проверен":"Бот: @"+username)+"\n"+(s.chat()>0?"Получатель: "+s.get("chat_name",""):"Получатель пока не подключён"));
+        setupLabel.setText(running&&s.chat()==0?"Код подключения: "+s.setupCode()+"\nОтправь эти 8 цифр боту со своего Telegram. Код действует 30 минут.":"");
+        setupLabel.setVisibility(running&&s.chat()==0?View.VISIBLE:View.GONE);
+        long seen=Long.parseLong(s.get("bot_last_seen","0"));String api=seen==0?"Ожидается первый ответ Telegram":System.currentTimeMillis()-seen<60000?"Telegram отвечает ✓":"Давно нет ответа Telegram";
+        stats.setText(api+"\nSMS: "+(s.enabled()?(s.chat()>0?"пересылка включена":"ожидают подключения получателя"):"нужно разрешение SMS или запуск бота")+"\nОтправлено сегодня: "+s.today()+" · очередь: "+s.pending());
+        error.setText(s.get("bot_error","")+ (s.get("bot_error","").isEmpty()?"":"\n")+s.get("error",""));
+    }
+    private void launch() {
+        if(launching)return;String token=tokenInput.getText().toString().trim();launching=true;refresh();
+        String idText=idInput.getText().toString().trim();final long recipient;
+        try{recipient=idText.isEmpty()?0:Rules.telegramId(idText);}catch(Exception e){launching=false;s.put("bot_error",Telegram.safe(e));refresh();return;}
+        worker.submit(()->{
+            try {
+                Telegram t=new Telegram(token);JSONObject wh=t.call("getWebhookInfo",new JSONObject()).getJSONObject("result");
+                if(!wh.optString("url").isEmpty())throw new UserError("Этот бот подключён к другому серверу. Используй отдельного бота из @BotFather.");
+                String username=t.call("getMe",new JSONObject()).getJSONObject("result").getString("username");
+                s.configureBot(token,username,recipient);s.put("bot_error","");s.put("bot_last_seen","0");
+                handler.post(()->{launching=false;if(alive)permissions();});
+            } catch(Exception e) {s.put("bot_error",Telegram.safe(e));handler.post(()->{launching=false;if(alive){refresh();toast(Telegram.safe(e));}});}
+        });
     }
     private void permissions() {
         java.util.ArrayList<String> ps=new java.util.ArrayList<>();ps.add(Manifest.permission.RECEIVE_SMS);ps.add(Manifest.permission.READ_PHONE_STATE);
@@ -95,10 +118,12 @@ public final class MainActivity extends Activity {
         java.util.ArrayList<String> missing=new java.util.ArrayList<>();for(String p:ps)if(checkSelfPermission(p)!=PackageManager.PERMISSION_GRANTED)missing.add(p);
         if(missing.isEmpty())start();else requestPermissions(missing.toArray(new String[0]),41);
     }
-    @Override public void onRequestPermissionsResult(int code,String[] ps,int[] grants){super.onRequestPermissionsResult(code,ps,grants);if(code==41) {
-        for(int g:grants)if(g!=PackageManager.PERMISSION_GRANTED){toast("Для работы нужны разрешения на SMS, SIM и уведомления");return;}start();}}
-    private void start(){try{s.put("enabled","true");RelayService.start(this);home();}catch(Exception e){s.put("enabled","false");toast("Android не разрешил запуск. Попробуй ещё раз и проверь настройки батареи.");}}
-    private void stop(){s.put("enabled","false");stopService(new Intent(this,RelayService.class));home();}
+    @Override public void onRequestPermissionsResult(int code,String[] ps,int[] grants){super.onRequestPermissionsResult(code,ps,grants);if(code==41)start();}
+    private void start(){try{
+        s.put("bot_enabled","true");s.put("enabled",""+(checkSelfPermission(Manifest.permission.RECEIVE_SMS)==PackageManager.PERMISSION_GRANTED));
+        RelayService.start(this);home();
+    }catch(Exception e){s.put("enabled","false");s.put("bot_enabled","false");s.put("bot_error","Android не разрешил запуск: проверь уведомления и настройки батареи.");home();}}
+    private void stop(){s.put("enabled","false");s.put("bot_enabled","false");stopService(new Intent(this,RelayService.class));home();}
     private void history() {
         page("Доставка SMS","Номер закрепляется в момент получения сообщения");
         try {JSONArray rows=s.recent();if(rows.length()==0)label(root,"Сообщений пока нет",17,false);
@@ -110,7 +135,8 @@ public final class MainActivity extends Activity {
     }
     private void settings() {
         page("Настройки","Телефон остаётся дома на Wi-Fi и зарядке");
-        button(root,"Подключить / изменить Telegram",true,()->{if(s.enabled()){toast("Сначала останови пересылку");return;}if(s.pending()>0){toast("Сначала отправь или удали очередь старого чата");return;}pair();});
+        button(root,"Токен и подключение Telegram",true,this::home);
+        button(root,"Разрешения SMS и запуск",false,()->{if(s.get("token","").isEmpty()){home();toast("Сначала введи токен бота");}else permissions();});
         CheckBox control=new CheckBox(this);control.setText("Разрешить управление моим адаптером 9eSIM из привязанного Telegram-чата");control.setTextColor(Color.WHITE);control.setChecked(s.get("esim_control","false").equals("true"));root.addView(control);
         control.setOnCheckedChangeListener((b,on)->{s.put("esim_control",""+on);if(!on)s.clearActive();});
         label(root,new LpaClient(this).installed()?"Компонент 9eSIM обнаружен":"Компонент 9eSIM не установлен. Установка профилей пока недоступна.",14,false);
@@ -134,36 +160,10 @@ public final class MainActivity extends Activity {
                 button(root,"Сохранить номер слота "+(info.getSimSlotIndex()+1),true,()->{try{s.number("physical:"+info.getSubscriptionId(),e.getText().toString());toast("Номер сохранён");}catch(Exception ex){toast(Telegram.safe(ex));}});
             }}catch(Exception e){toast("Не удалось прочитать SIM");}button(root,"Назад",false,this::settings);
     }
-    private void pair() {
-        page("Подключение Telegram","Создай отдельного бота через @BotFather и вставь его токен. Токен вводится только здесь.");
-        EditText token=input("Токен бота",true);
-        button(root,"Создать ссылку для привязки",true,()->{
-            String value=token.getText().toString().trim();background(()->{
-                Telegram t=new Telegram(value);JSONObject wh=t.call("getWebhookInfo",new JSONObject()).getJSONObject("result");
-                if(!wh.optString("url").isEmpty())throw new UserError("У этого бота уже есть webhook. Создай отдельного бота для SMS.");
-                String username=t.call("getMe",new JSONObject()).getJSONObject("result").getString("username");
-                String nonce=UUID.randomUUID().toString().replace("-","");s.put("pair_token",value);s.put("pair_nonce",nonce);s.put("pair_expires",""+(System.currentTimeMillis()+15*60000));s.put("pair_offset","0");s.put("pair_link","https://t.me/"+username+"?start="+nonce);return "Готово";
-            },r->pairLink());
-        });button(root,"Назад",false,this::home);
-    }
-    private void pairLink() {
-        page("Привязка твоего чата","Открой ссылку в своём Telegram и нажми «Начать». Ссылку можно отправить с Android на твой iPhone.");
-        button(root,"Скопировать ссылку",false,()->{getSystemService(ClipboardManager.class).setPrimaryClip(ClipData.newPlainText("Привязка SMS Мост",s.get("pair_link","")));toast("Ссылка скопирована");});
-        button(root,"Открыть Telegram",false,()->{try{startActivity(new Intent(Intent.ACTION_VIEW,Uri.parse(s.get("pair_link",""))));}catch(Exception e){toast("Скопируй ссылку и открой её на своём телефоне");}});
-        button(root,"Проверить подключение",true,()->background(()->{
-            if(System.currentTimeMillis()>Long.parseLong(s.get("pair_expires","0")))throw new UserError("Ссылка истекла. Создай новую.");
-            Telegram t=new Telegram(s.get("pair_token",""));JSONArray updates=t.call("getUpdates",new JSONObject().put("timeout",0).put("limit",100).put("offset",Long.parseLong(s.get("pair_offset","0")))) .getJSONArray("result");
-            for(int i=0;i<updates.length();i++){JSONObject u=updates.getJSONObject(i);s.put("pair_offset",""+(u.getLong("update_id")+1));JSONObject m=u.optJSONObject("message");if(m==null)continue;
-                JSONObject chat=m.getJSONObject("chat"),from=m.optJSONObject("from");
-                if(m.optString("text").equals("/start "+s.get("pair_nonce",""))&&chat.optString("type").equals("private")&&from!=null&&!from.optBoolean("is_bot")&&from.optLong("id")==chat.getLong("id")) {
-                    long id=chat.getLong("id");String name=chat.optString("first_name","Личный чат");s.bind(s.get("pair_token",""),id,name);s.put("pair_token","");return "Привязан чат: "+name;
-                }}throw new UserError("Нажми «Начать» по ссылке на своём Telegram, затем проверь ещё раз.");
-        },r->{toast(r);home();}));button(root,"Назад",false,this::pair);
-    }
     private void appSettings(){startActivity(new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,Uri.parse("package:"+getPackageName())));}
     private interface Task {String run() throws Exception;}
     private interface Done {void accept(String value);}
-    private void background(Task task,Done done){worker.submit(()->{try{String value=task.run();handler.post(()->{if(alive)done.accept(value);});}catch(Exception e){String message=Telegram.safe(e);handler.post(()->{if(alive)toast(message);});}});}
+    private void background(Task task,Done done){worker.submit(()->{try{String value=task.run();handler.post(()->{if(alive)done.accept(value);});}catch(Exception e){String message=Telegram.safe(e);handler.post(()->{if(alive){s.put("error",message);toast(message);if(homeVisible)refresh();}});}});}
     private void toast(String text){Toast.makeText(this,text,Toast.LENGTH_LONG).show();}
     @Override public void onBackPressed(){home();}
     @Override protected void onDestroy(){alive=false;handler.removeCallbacks(ticker);worker.shutdownNow();super.onDestroy();}

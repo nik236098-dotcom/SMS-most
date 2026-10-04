@@ -9,6 +9,13 @@ import java.util.Locale;
 /** Pure Java rules; tested without the Android SDK. */
 public final class Rules {
     private Rules() {}
+    public static long telegramId(String text) {
+        if(text==null || !text.trim().matches("[1-9][0-9]{0,15}"))
+            throw new IllegalArgumentException("Telegram ID — положительное число, без @ и без номера телефона");
+        long value=Long.parseLong(text.trim());
+        if(value>4503599627370495L)throw new IllegalArgumentException("Проверь Telegram ID: число слишком большое");
+        return value;
+    }
     public static String phone(String value) {
         String p = value == null ? "" : value.replaceAll("[\\s()\\-]", "");
         if (!p.matches("\\+[1-9][0-9]{6,14}")) throw new IllegalArgumentException("Введите номер с кодом страны, например +79991234567");

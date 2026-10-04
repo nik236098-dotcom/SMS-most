@@ -19,24 +19,33 @@ final class Bot {
     private final Store s; private final LpaClient lpa;
     private static final AtomicBoolean POLLING=new AtomicBoolean(false);
     Bot(Context c) {s=BridgeApp.store();lpa=new LpaClient(c);}
+    Bot(Store store,LpaClient adapter) {s=store;lpa=adapter;}
+    private final java.util.Map<Long,Long> prompts=new java.util.LinkedHashMap<>();
     static JSONObject button(String text,String data) throws Exception {return new JSONObject().put("text",text).put("callback_data",data);}
     static JSONObject keyboard(JSONObject... buttons) throws Exception {
         JSONArray rows=new JSONArray();for(JSONObject b:buttons) rows.put(new JSONArray().put(b));
         return new JSONObject().put("inline_keyboard",rows);
     }
     void poll(int timeout) throws Exception {
-        if(!s.enabled() || s.chat()==0 || !POLLING.compareAndSet(false,true))return;
+        poll(new Telegram(s.get("token","")),timeout);
+    }
+    void poll(Telegram t,int timeout) throws Exception {
+        if(!s.running())return;
+        if(!POLLING.compareAndSet(false,true)){java.util.concurrent.TimeUnit.MILLISECONDS.sleep(300);return;}
+        String session=s.epoch();
         try {
-            Telegram t=new Telegram(s.get("token",""));
             JSONArray updates=t.call("getUpdates",new JSONObject().put("offset",Long.parseLong(s.get("offset","0")))
                 .put("timeout",timeout).put("limit",50).put("allowed_updates",new JSONArray().put("message").put("callback_query"))).getJSONArray("result");
-            for(int i=0;i<updates.length() && s.enabled();i++) {
+            if(!java.util.Objects.equals(session,s.epoch()))return;
+            s.put("bot_last_seen",""+System.currentTimeMillis());s.put("bot_error","");
+            for(int i=0;i<updates.length() && s.running();i++) {
+                if(!java.util.Objects.equals(session,s.epoch()))return;
                 JSONObject u=updates.getJSONObject(i);long id=u.getLong("update_id");
                 // Commit consumption before side effects. A crash must not replay a one-use download.
                 s.put("offset",""+(id+1));
                 if(!s.beginOperation(id))continue;
                 try {handle(t,u);} catch(Exception e) {s.put("error",Telegram.safe(e));
-                    try {t.send(s.chat(),Telegram.safe(e),null);} catch(Exception ignored) {}}
+                    if(s.chat()>0)try {t.send(s.chat(),Telegram.safe(e),null);} catch(Exception ignored) {}}
                 finally {s.endOperation(id);}
             }
         } finally {POLLING.set(false);}
@@ -45,6 +54,23 @@ final class Bot {
         JSONObject cb=u.optJSONObject("callback_query");JSONObject m=cb==null?u.optJSONObject("message"):cb.optJSONObject("message");
         if(m==null)return;
         JSONObject chat=m.getJSONObject("chat"),from=cb==null?m.optJSONObject("from"):cb.optJSONObject("from");
+        if(s.chat()==0) {
+            if(cb!=null || from==null || from.optBoolean("is_bot") || !chat.optString("type").equals("private")
+                || chat.optLong("id")<=0 || from.optLong("id")!=chat.optLong("id"))return;
+            long id=chat.getLong("id");String input=m.optString("text","").trim();
+            if(input.matches("[0-9]{8}")) {
+                if(s.claim(id,chat.optString("first_name","Получатель SMS"),input,m.optLong("date")*1000L)) {
+                    t.send(id,"✅ Этот Telegram подключён как получатель SMS.\nНа Android больше ничего подтверждать не нужно.",null);
+                    menu(t,null);
+                } else t.send(id,"Код неверный, истёк или временно заблокирован после нескольких попыток. Посмотри код на главном экране SMS Мост и попробуй ещё раз через минуту.",null);
+            } else {
+                long now=System.currentTimeMillis();
+                if(now-prompts.getOrDefault(id,0L)<10000)return;
+                if(prompts.size()>=64)prompts.remove(prompts.keySet().iterator().next());prompts.put(id,now);
+                t.send(id,"Бот работает ✅\nОтправь сюда 8 цифр с главного экрана приложения SMS Мост на Android.\n\nОтправить код должен тот, кто будет получать SMS. Владельцу Android не нужно подключать свой Telegram.",null);
+            }
+            return;
+        }
         if(from==null || !Rules.authorized(s.chat(),chat.getLong("id"),chat.optString("type"),from.optBoolean("is_bot")) || from.optLong("id")!=s.chat())return;
         if(cb!=null) {
             try {t.call("answerCallbackQuery",new JSONObject().put("callback_query_id",cb.getString("id")));}catch(Exception ignored){}
@@ -52,6 +78,7 @@ final class Bot {
             if(data.equals("menu")){ menu(t,m);return; }
             if(data.equals("status")){ show(t,m,status(),keyboard(button("Назад","menu")));return; }
             if(data.equals("last")){ recent(t,m);return; }
+            if(data.equals("test")){t.send(s.chat(),"✅ Бот отвечает. Телефон: "+s.get("device_status","")+"\nПересылка SMS: "+(s.enabled()?"включена":"выключена — проверь разрешение SMS на Android"),null);return;}
             if(data.equals("profiles")){ profiles(t,m);return; }
             if(data.equals("add")){beginAdd(t,m);return;}
             if(data.equals("cancel")){s.put("draft","{}");menu(t,m);return;}
@@ -167,7 +194,7 @@ final class Bot {
         p.put("reply_markup",keyboard==null?new JSONObject().put("inline_keyboard",new JSONArray()):keyboard);
         try {t.call("editMessageText",p);}catch(Telegram.ApiError e){if(e.code!=400)throw e;}
     }
-    private void menu(Telegram t,JSONObject m) throws Exception {show(t,m,"SMS Мост\n"+status(),keyboard(button("Номера и eSIM","profiles"),button("Статус телефона","status"),button("Последние SMS","last")));}
+    private void menu(Telegram t,JSONObject m) throws Exception {show(t,m,"SMS Мост\n"+status(),keyboard(button("Проверить связь","test"),button("Статус телефона","status"),button("Последние SMS","last"),button("Номера и eSIM","profiles")));}
     private String status() {return "Телефон на связи\nПересылка: "+(s.enabled()?"включена":"выключена")+"\nОтправлено сегодня: "+s.today()+"\nВ очереди: "+s.pending()+"\n"+s.get("device_status","");}
     private void recent(Telegram t,JSONObject m) throws Exception {
         StringBuilder b=new StringBuilder("Последние SMS\n");JSONArray rows=s.recent();

@@ -40,12 +40,21 @@ jobs:
       - name: Build relay and lint
         run: |
           if [ -f vendor/community/sha256.txt ]; then
-            gradle :app:assembleDebug :app:lintDebug -PlpaSignerSha256="$(cat vendor/community/sha256.txt)"
+            gradle :app:assembleDebug :app:assembleRelease :app:lintDebug :app:testDebugUnitTest -PlpaSignerSha256="$(cat vendor/community/sha256.txt)"
           else
-            gradle :app:assembleDebug :app:lintDebug
+            gradle :app:assembleDebug :app:assembleRelease :app:lintDebug :app:testDebugUnitTest
           fi
           mkdir -p dist
           cp app/build/outputs/apk/debug/app-debug.apk dist/SMS-Most.apk
+          cp app/build/outputs/apk/release/app-release-unsigned.apk dist/SMS-Most-unsigned.apk
+      - name: Export APK signing utility
+        run: |
+          mkdir -p signing-tool
+          cp "$ANDROID_HOME/build-tools/35.0.0/lib/apksigner.jar" signing-tool/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Android-signing-tool
+          path: signing-tool/apksigner.jar
       - name: Fetch reviewed bridge
         if: inputs.build_adapter
         env:

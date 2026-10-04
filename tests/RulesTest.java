@@ -8,6 +8,9 @@ public final class RulesTest {
     public static void main(String[] args) {
         check(Rules.phone("+7 (999) 123-45-67").equals("+79991234567"),"Phone normalization");
         check(Rules.phone("+84901234567").equals("+84901234567"),"International phone");
+        check(Rules.telegramId(" 123456789 ")==123456789L,"Telegram ID");
+        check(Rules.telegramId("7999123456")==7999123456L,"Large Telegram ID");
+        for(String id:new String[]{"-100123","0","@username","+79991234567","abc","","4503599627370496"})rejects(()->Rules.telegramId(id));
         for(String p:new String[]{"79991234567","+00000","+7","+1234567890123456","+7999abc","","+7999\n/start"})rejects(()->Rules.phone(p));
         String eid="89049032123456789012345678901234",icc="8901234567890123456";
         String a=Rules.profileKey(eid,icc);
@@ -28,6 +31,13 @@ public final class RulesTest {
         check(Rules.hash("one").equals(Rules.hash("one")),"Stable dedup");check(!Rules.hash("one").equals(Rules.hash("two")),"Different SMS IDs");
         check(Rules.service("UnlistedSender").equals("UnlistedSender"),"Unknown service stays original");
         check(Rules.service("12345").equals("12345"),"No guessed numerical service");
+        check(SetupCode.create().matches("[0-9]{8}"),"Random setup code format");
+        check(SetupCode.matches("01234567","01234567",2000,1000),"Leading zero preserved");
+        check(!SetupCode.matches("01234567","11234567",2000,1000),"Wrong code denied");
+        check(!SetupCode.matches("01234567","01234567",1000,1000),"Expired code denied");
+        check(!SetupCode.matches("","",2000,1000),"Missing code denied");
+        check(!SetupCode.matches(null,"01234567",2000,1000),"Null code denied");
+        check(!SetupCode.matches("01234567","/start",2000,1000),"Command cannot authorize");
         System.out.println("Passed "+count+" core checks");
     }
 }

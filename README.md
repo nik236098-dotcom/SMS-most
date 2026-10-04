@@ -1,9 +1,23 @@
-# SMS Мост — исходники 0.1
+# SMS Мост — 0.2
 
 Личный Android SMS relay для выделенного телефона дома. Пользовательское приложение
 и интерфейс Telegram написаны на русском. Первый APK собран через GitHub Actions;
 компиляция и lint прошли. Работа на Xiaomi и удалённая установка eSIM ещё не проверены.
 Сначала прочитайте [START-HERE.txt](START-HERE.txt).
+
+## Быстрый запуск v0.2
+
+На Android: токен + Telegram ID получателя → «Запустить бота». В своём Telegram
+получатель пишет /start. Владельцу Android не нужно подключать свой Telegram.
+Если ID неизвестен, остаётся альтернативное подключение по восьмизначному коду.
+Бот запускается до подключения получателя и отвечает независимо от разрешения SMS.
+Загрузка APK сама по себе не может запустить бота без его токена и первоначального
+открытия приложения/разрешений Android.
+
+После временной debug-подписи первой версии используется постоянный личный ключ,
+поэтому старое приложение надо удалить перед установкой v0.2. При удалении теряются
+локальные настройки и очередь; новые версии можно подписывать тем же личным ключом.
+
 
 ## Сборка приложения
 
@@ -14,7 +28,7 @@ AGP 8.9.2, Java 17, minSdk 28, targetSdk 35. Единственная внешн
 
 ```sh
 bash tools/test_core.sh
-gradle :app:assembleDebug :app:lintDebug
+gradle :app:assembleDebug :app:lintDebug :app:testDebugUnitTest
 ```
 
 В Android Studio: импорт проекта, установите SDK 35, затем выберите сборку APK.
@@ -64,7 +78,7 @@ https://github.com/9esim/9eSIMCommunityKey
 
 ```sh
 python3 tools/prepare_signer.py
-gradle :app:assembleDebug :app:lintDebug -PlpaSignerSha256="$(cat vendor/community/sha256.txt)"
+gradle :app:assembleDebug :app:lintDebug :app:testDebugUnitTest -PlpaSignerSha256="$(cat vendor/community/sha256.txt)"
 mkdir -p dist
 cp app/build/outputs/apk/debug/app-debug.apk dist/SMS-Most.apk
 python3 tools/build_companion.py --bridge /absolute/path/to/reviewed/openeuicc-bridge --relay-apk dist/SMS-Most.apk
@@ -81,7 +95,7 @@ commit и доступности карты, но клиентская функ�
 
 AndroidKeyStore AES-256-GCM: токен, черновики QR/номер и payload очереди шифруются.
 Backup отключён. Доступ бота — один привязанный private chat, совпадение user ID и chat ID;
-одноразовая pairing-ссылка; nonce/срок в подтверждениях операций. При изменении Telegram-чата
+явный Telegram ID или одноразовый код на 30 минут; nonce/срок в подтверждениях операций. При изменении Telegram-чата
 нужно остановить пересылку и завершить либо явно удалить прежнюю очередь. SMS не перенаправляются
 новому чату задним числом. Постоянный foreground service с уведомлением и кнопкой остановки.
 Только HTTPS; TLS verification не отключается. Коды активации не пишутся в логи.

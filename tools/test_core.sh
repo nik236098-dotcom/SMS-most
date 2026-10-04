@@ -3,7 +3,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 mkdir -p build/core-tests
 if command -v javac >/dev/null; then
-  javac -encoding UTF-8 -d build/core-tests app/src/main/java/ru/smsbridge/app/Rules.java tests/RulesTest.java tools/ParseJava.java
+  javac -encoding UTF-8 -d build/core-tests app/src/main/java/ru/smsbridge/app/Rules.java app/src/main/java/ru/smsbridge/app/SetupCode.java tests/RulesTest.java tools/ParseJava.java
 else
   java tools/CompileCore.java
 fi

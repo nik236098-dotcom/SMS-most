@@ -64,6 +64,9 @@ final class Telegram {
     }
     static String safe(Exception e) {
         if(e instanceof ApiError || e instanceof IllegalArgumentException || e instanceof UserError) return e.getMessage();
+        if(e instanceof java.net.UnknownHostException) return "Не удаётся найти сервер Telegram. Проверь DNS, Wi-Fi или VPN на Android.";
+        if(e instanceof java.net.SocketTimeoutException || e instanceof java.net.ConnectException) return "Телефон не может подключиться к api.telegram.org. Наличие интернета не означает доступ к Telegram: проверь VPN или другую сеть на Android.";
+        if(e instanceof javax.net.ssl.SSLException) return "Ошибка защищённого соединения с Telegram. Проверь дату и время на Android и настройки VPN.";
         return "Операция не завершена. Проверь интернет и состояние приложения.";
     }
 }

@@ -30,8 +30,45 @@ final class Store extends SQLiteOpenHelper {
         } catch (Exception e) { throw new IllegalStateException("Не удалось сохранить настройки", e); }
     }
     synchronized boolean enabled() { return get("enabled", "false").equals("true"); }
+    synchronized boolean running() { return get("bot_enabled", get("enabled", "false")).equals("true") && !get("token", "").isEmpty(); }
     synchronized long chat() { return Long.parseLong(get("chat", "0")); }
     synchronized String epoch() { return get("epoch", ""); }
+    synchronized void configureBot(String token, String username, long recipient) {
+        if(recipient<0 || recipient>4503599627370495L)throw new IllegalArgumentException("Неверный Telegram ID");
+        if (!get("token", "").equals(token) || chat()!=recipient) {
+            if (running() || enabled()) throw new IllegalStateException("Сначала останови бота");
+            if (pending() > 0) throw new IllegalStateException("Сначала отправь или удали очередь прежнего бота");
+            put("chat", ""+recipient); put("chat_name", recipient==0?"":"Telegram ID "+recipient); put("offset", "0");
+            put("epoch", UUID.randomUUID().toString()); put("draft", "{}");
+            put("setup_code", ""); getWritableDatabase().delete("operations", null, null);
+            getWritableDatabase().delete("outbox", "state='sent'", null);
+        }
+        put("token", token); put("bot_username", username); put("error", "");
+        if (chat() == 0) setupCode();
+    }
+    synchronized String setupCode() {
+        if (chat() != 0) return "";
+        if (Long.parseLong(get("setup_expires", "0")) <= System.currentTimeMillis() || get("setup_code", "").isEmpty()) {
+            put("setup_code", SetupCode.create()); put("setup_expires", ""+(System.currentTimeMillis()+30*60000L));
+            put("setup_created", ""+(System.currentTimeMillis()/1000*1000));
+            put("setup_failures", "0"); put("setup_locked_until", "0");
+        }
+        return get("setup_code", "");
+    }
+    synchronized boolean claim(long chat, String name, String code, long received) {
+        long now=System.currentTimeMillis();
+        if (chat<=0 || chat()!=0 || !running() || received<Long.parseLong(get("setup_created", "0"))
+            || now<Long.parseLong(get("setup_locked_until", "0"))) return false;
+        if (!SetupCode.matches(get("setup_code", ""), code, Long.parseLong(get("setup_expires", "0")), now)) {
+            int attempts=Integer.parseInt(get("setup_failures", "0"))+1; put("setup_failures", ""+attempts);
+            if (attempts>=10) {put("setup_locked_until", ""+(now+60000L));put("setup_failures", "0");}
+            return false;
+        }
+        SQLiteDatabase db=getWritableDatabase(); db.beginTransaction();
+        try {put("chat", ""+chat);put("chat_name", name);put("setup_code", "");put("setup_expires", "0");
+            put("setup_failures", "0");put("error", "");db.setTransactionSuccessful();return true;
+        } finally {db.endTransaction();}
+    }
     synchronized void bind(String token, long chat, String name) {
         SQLiteDatabase db = getWritableDatabase(); db.beginTransaction();
         try {
