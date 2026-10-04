@@ -14,4 +14,8 @@ assert 'android.permission.RECEIVE_SMS' in permissions
 assert 'android.permission.SEND_SMS' not in permissions
 assert 'android.permission.READ_SMS' not in permissions
 assert root.find('application').get(ns+'allowBackup')=='false'
+receiver=next(n for n in root.find('application').findall('receiver') if n.get(ns+'name')=='.SmsReceiver')
+assert receiver.get(ns+'exported')=='true'
+assert receiver.get(ns+'permission')=='android.permission.BROADCAST_SMS'
+assert any(n.get(ns+'name')=='android.provider.Telephony.SMS_RECEIVED' for n in receiver.findall('intent-filter/action'))
 print('Manifest, resources and permission checks passed')

@@ -9,11 +9,11 @@ import java.util.concurrent.atomic.AtomicBoolean;
 final class Outbox {
     private static final AtomicBoolean DRAINING=new AtomicBoolean(false);
     static void drain(Context c) {
-        Store s=BridgeApp.store();if(!s.enabled()||s.chat()==0||!DRAINING.compareAndSet(false,true))return;
+        Store s=BridgeApp.store();if(!s.running()||s.chat()==0||!DRAINING.compareAndSet(false,true))return;
         PowerManager.WakeLock lock=c.getSystemService(PowerManager.class).newWakeLock(PowerManager.PARTIAL_WAKE_LOCK,"smsbridge:delivery");
         try {
             lock.acquire(90000);Telegram t=new Telegram(s.get("token",""));String epoch=s.epoch();
-            for(int count=0;count<5 && s.enabled();count++) {
+            for(int count=0;count<5 && s.running();count++) {
                 JSONObject p=s.next();if(p==null)return;long id=p.getLong("id");
                 long destination=p.optLong("chat_id");if(destination<=0)destination=s.chat();
                 if(!s.chats().contains(destination)){s.failed(id,0,86400,"Получатель изменился: доставка остановлена");continue;}
@@ -21,7 +21,7 @@ final class Outbox {
                 List<JSONObject> chunks=SmsText.messages(p,destination);
                 try {
                     for(int i=p.getInt("part");i<chunks.size();i++) {
-                        if(!s.enabled() || !epoch.equals(s.epoch()) || !s.pending(id))return;
+                        if(!s.running() || !epoch.equals(s.epoch()) || !s.pending(id))return;
                         t.call("sendMessage",chunks.get(i));s.progress(id,i+1);
                     }s.delivered(id);
                 } catch(Exception e) {

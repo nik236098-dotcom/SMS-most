@@ -238,7 +238,7 @@ final class Bot {
         try {t.call("editMessageText",p);}catch(Telegram.ApiError e){if(e.code!=400)throw e;}
     }
     private void menu(Telegram t,JSONObject m) throws Exception {show(t,m,"SMS Мост\n"+status(),keyboard(button("Проверить связь","test"),button("Статус телефона","status"),button("Последние SMS","last"),button("Мои SIM-карты","profiles")));}
-    private String status() {return "Телефон на связи\nПересылка: "+(s.enabled()?"включена":"выключена")+"\nОтправлено сегодня: "+s.today()+"\nВ очереди: "+s.pending()+"\n"+s.get("device_status","");}
+    private String status() {return "Телефон на связи\n"+SmsDiagnostics.report(s)+"\nОтправлено сегодня: "+s.today()+"\nВ очереди: "+s.pending()+"\n"+s.get("device_status","");}
     private void recent(Telegram t,JSONObject m) throws Exception {
         StringBuilder b=new StringBuilder("Последние SMS\n");JSONArray rows=s.recent(replyTo());
         for(int i=0;i<rows.length();i++){JSONObject p=rows.getJSONObject(i);b.append("\n#").append(p.getLong("id")).append(" · ").append(p.optString("recipient")).append("\n")

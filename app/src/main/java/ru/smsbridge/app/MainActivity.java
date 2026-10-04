@@ -38,7 +38,7 @@ public final class MainActivity extends Activity {
     private static final int BG=Color.rgb(13,23,36),CARD=Color.rgb(23,37,53),BLUE=Color.rgb(22,133,255),MUTED=Color.rgb(165,188,213);
     private Store s;private LinearLayout root;private final ExecutorService worker=Executors.newSingleThreadExecutor();
     private final Handler handler=new Handler(Looper.getMainLooper());private boolean alive=true,homeVisible;
-    private TextView status,stats,connection,error;
+    private TextView status,stats,connection,error,smsDiagnostics;
     private Button relayToggle; private TextView setupLabel; private EditText tokenInput,idInput; private boolean launching;
     private final Runnable ticker=new Runnable(){public void run(){if(alive){if(homeVisible)refresh();handler.postDelayed(this,3000);}}};
     @Override public void onCreate(Bundle b){super.onCreate(b);s=BridgeApp.store();if(s.running())try{RelayService.start(this);}catch(Exception e){s.put("bot_error",Telegram.safe(e));}home();handler.post(ticker);}
@@ -79,7 +79,7 @@ public final class MainActivity extends Activity {
             String text="Бот: @"+s.get("bot_username","")+"\nКод: "+(s.chat()==0?s.setupCode():"Получатель уже подключён");
             getSystemService(ClipboardManager.class).setPrimaryClip(ClipData.newPlainText("SMS Мост",text));toast("Скопировано — передай получателю SMS");
         });
-        stats=label(card(),"",20,true);error=label(root,"",14,false);error.setTextColor(Color.rgb(255,196,105));
+        stats=label(card(),"",20,true);smsDiagnostics=label(card(),"",14,false);error=label(root,"",14,false);error.setTextColor(Color.rgb(255,196,105));
         button(root,"Отправить тест в Telegram",true,()->{if(s.chat()==0){toast("Сначала отправь код боту со своего Telegram");return;}if(!s.running()){toast("Сначала запусти бота");return;}background(()->{
             Telegram t=new Telegram(s.get("token",""));int sent=0;String failure="";
             for(long target:s.chats())try{t.send(target,"✅ Телефон подключён. Это тест SMS Мост.\nПересылка SMS: "+(s.enabled()?"включена":"нет разрешения на SMS — открой настройки Android"),null);sent++;}catch(Exception e){failure=Telegram.safe(e);}
@@ -100,6 +100,7 @@ public final class MainActivity extends Activity {
         setupLabel.setVisibility(running&&s.chat()==0?View.VISIBLE:View.GONE);
         long seen=Long.parseLong(s.get("bot_last_seen","0"));String api=seen==0?"Ожидается первый ответ Telegram":System.currentTimeMillis()-seen<60000?"Telegram отвечает ✓":"Давно нет ответа Telegram";
         stats.setText(api+"\nSMS: "+(s.enabled()?(s.chat()>0?"пересылка включена":"ожидают подключения получателя"):"нужно разрешение SMS или запуск бота")+"\nДоставок сегодня: "+s.today()+" · очередь: "+s.pending());
+        smsDiagnostics.setText(SmsDiagnostics.report(s));
         error.setText(s.get("bot_error","")+ (s.get("bot_error","").isEmpty()?"":"\n")+s.get("error",""));
     }
     private void launch() {
@@ -130,6 +131,7 @@ public final class MainActivity extends Activity {
     private void stop(){s.put("enabled","false");s.put("bot_enabled","false");stopService(new Intent(this,RelayService.class));home();}
     private void history() {
         page("Доставка SMS","Номер закрепляется в момент получения сообщения");
+        label(card(),SmsDiagnostics.report(s),14,false);
         try {JSONArray rows=s.recent();if(rows.length()==0)label(root,"Сообщений пока нет",17,false);
             for(int i=0;i<rows.length();i++){JSONObject p=rows.getJSONObject(i);LinearLayout c=card();label(c,p.optString("recipient"),19,true);
                 label(c,"Доставка в Telegram ID: "+p.optLong("chat_id",s.chat()),14,false);

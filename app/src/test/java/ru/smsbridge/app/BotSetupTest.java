@@ -54,6 +54,14 @@ public class BotSetupTest {
         owner=456;updates(message("/start",456,"private"));bot.poll(api,0);
         verify(api).send(eq(456L),contains("SMS Мост"),notNull());
     }
+    @Test public void statusReportsCaptureFailureInsteadOfOnlyTelegramConnection() throws Exception {
+        owner=456;when(s.smsPermission()).thenReturn(true);
+        values.put("sms_result","Ошибка обработки входящего SMS");
+        values.put("sms_receive_error","Не удалось сохранить SMS (IllegalStateException)");
+        updates(message("/status",456,"private"));bot.poll(api,0);
+        verify(api).send(eq(456L),argThat(text->text.contains("Разрешение SMS: есть")
+            && text.contains("Сигнал о новом SMS: пока не было") && text.contains("IllegalStateException")),isNull());
+    }
     @Test public void otherAccountCannotAccessConfiguredBot() throws Exception {
         owner=789;updates(message("/start",456,"private"));bot.poll(api,0);
         verify(api,never()).send(anyLong(),anyString(),any());verify(s,never()).recent(anyLong());

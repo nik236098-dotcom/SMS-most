@@ -10,7 +10,8 @@ import org.json.JSONObject;
 import java.util.UUID;
 
 final class Store extends SQLiteOpenHelper {
-    Store(Context c) { super(c, "bridge.db", null, 2); }
+    private final Context context;
+    Store(Context c) { super(c, "bridge.db", null, 2); context=c.getApplicationContext(); }
     @Override public void onCreate(SQLiteDatabase db) {
         db.execSQL("CREATE TABLE settings (k TEXT PRIMARY KEY, v TEXT NOT NULL)");
         db.execSQL("CREATE TABLE outbox (id INTEGER PRIMARY KEY AUTOINCREMENT, fingerprint TEXT UNIQUE, payload TEXT NOT NULL, created INTEGER NOT NULL, state TEXT NOT NULL DEFAULT 'pending', part INTEGER NOT NULL DEFAULT 0, attempts INTEGER NOT NULL DEFAULT 0, next_try INTEGER NOT NULL DEFAULT 0, error TEXT NOT NULL DEFAULT '', delivered INTEGER NOT NULL DEFAULT 0, route TEXT NOT NULL DEFAULT '')");
@@ -37,7 +38,10 @@ final class Store extends SQLiteOpenHelper {
             getWritableDatabase().insertWithOnConflict("settings", null, cv, SQLiteDatabase.CONFLICT_REPLACE);
         } catch (Exception e) { throw new IllegalStateException("Не удалось сохранить настройки", e); }
     }
-    synchronized boolean enabled() { return get("enabled", "false").equals("true"); }
+    boolean smsPermission() { return context.checkSelfPermission(android.Manifest.permission.RECEIVE_SMS)==android.content.pm.PackageManager.PERMISSION_GRANTED; }
+    // Permission can change in Android settings while the bot keeps running.
+    // The legacy "enabled" preference is not a live permission check.
+    synchronized boolean enabled() { return running() && smsPermission(); }
     synchronized boolean running() { return get("bot_enabled", get("enabled", "false")).equals("true") && !get("token", "").isEmpty(); }
     synchronized long chat() { return Long.parseLong(get("chat", "0")); }
     synchronized java.util.List<Long> chats() {
