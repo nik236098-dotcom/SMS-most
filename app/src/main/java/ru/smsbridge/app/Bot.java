@@ -202,6 +202,11 @@ final class Bot {
         if(!s.get("esim_control","false").equals("true"))throw new UserError("Управление адаптером выключено на телефоне");
         JSONObject card=lpa.card();if(!card.getString("eid").equals(d.optString("eid")))throw new UserError("Адаптер изменился. Начни операцию заново.");
         String stage=d.optString("stage");if(!stage.equals("confirm_add")&&!stage.equals("confirm_enable"))return;
+        if(stage.equals("confirm_add")) {
+            String[] activation=d.getString("code").split("\\$",-1);
+            if(activation.length>4 && activation[4].equals("1") && d.optString("pin").isEmpty())
+                throw new UserError("Оператор требует код подтверждения. Пришли /pin КОД, затем снова нажми «Установить eSIM».");
+        }
         if(stage.equals("confirm_enable") && s.number(d.getString("key")).equals("Номер не задан"))throw new UserError("Сначала задай номер этого профиля");
         // Invalidate before changing the chip. Repeated button taps cannot repeat the operation.
         s.put(draftKey(),"{}");s.put("switching","true");s.clearActive();

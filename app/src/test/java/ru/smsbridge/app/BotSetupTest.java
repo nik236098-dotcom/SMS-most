@@ -122,5 +122,55 @@ public class BotSetupTest {
         verify(s,never()).number(anyString(),anyString());
         verify(api).send(eq(456L),contains("больше не активна"),isNull());
     }
+    private LpaClient beginEsim(String code) throws Exception {
+        owner=456;values.put("esim_control","true");LpaClient adapter=mock(LpaClient.class);
+        when(adapter.installed()).thenReturn(true);
+        when(adapter.card()).thenReturn(new JSONObject().put("slot",0).put("port",0).put("eid","89000000000000000000000000000001"));
+        when(adapter.download(anyString(),anyString())).thenReturn(new JSONObject().put("eid","89000000000000000000000000000001").put("iccid","8900000000000000001"));
+        when(adapter.profiles(0,0)).thenReturn(new JSONArray().put(new JSONObject().put("iccid","8900000000000000001").put("enabled",true)));
+        bot=new Bot(s,adapter);updates(message("/add",456,"private"));bot.poll(api,0);
+        updates(message("+79991234567",456,"private"));bot.poll(api,0);
+        updates(message(code,456,"private"));bot.poll(api,0);return adapter;
+    }
+    private void confirmEsim() throws Exception {
+        JSONObject draft=new JSONObject(values.get("draft:456"));updates(callback("confirm:"+draft.getString("nonce")));bot.poll(api,0);
+    }
+    @Test public void esimInstallBindsEnteredNumberBeforeActivationAndVerifiesActiveProfile() throws Exception {
+        LpaClient adapter=beginEsim("LPA:1$smdp.example$MATCH");confirmEsim();
+        org.mockito.InOrder order=inOrder(adapter,s);
+        order.verify(adapter).download("LPA:1$smdp.example$MATCH","");
+        order.verify(s).number(Rules.profileKey("89000000000000000000000000000001","8900000000000000001"),"+79991234567");
+        order.verify(adapter).enable("8900000000000000001");order.verify(adapter).refresh(s);
+        verify(api).send(eq(456L),contains("Активирован профиль +79991234567"),notNull());
+        assertEquals("{}",values.get("last_install"));assertEquals("false",values.get("switching"));
+    }
+    @Test public void esimChangedCardCannotConsumeActivationCode() throws Exception {
+        LpaClient adapter=beginEsim("LPA:1$smdp.example$MATCH");
+        when(adapter.card()).thenReturn(new JSONObject().put("eid","different-card"));confirmEsim();
+        verify(adapter,never()).download(anyString(),anyString());verify(api).send(eq(456L),contains("Адаптер изменился"),isNull());
+    }
+    @Test public void failedEsimDownloadDoesNotActivateOrClaimSuccess() throws Exception {
+        LpaClient adapter=beginEsim("LPA:1$smdp.example$MATCH");when(adapter.download(anyString(),anyString())).thenThrow(new UserError("Оператор отклонил загрузку"));
+        confirmEsim();verify(adapter,never()).enable(anyString());verify(s,never()).number(anyString(),anyString());
+        verify(api,never()).send(anyLong(),contains("Активирован профиль"),any());
+        assertFalse(values.get("last_install").equals("{}"));
+    }
+    @Test public void esimInstalledButInactiveDoesNotClaimSuccess() throws Exception {
+        LpaClient adapter=beginEsim("LPA:1$smdp.example$MATCH");
+        when(adapter.profiles(0,0)).thenReturn(new JSONArray().put(new JSONObject().put("iccid","8900000000000000001").put("enabled",false)));
+        confirmEsim();verify(api,never()).send(anyLong(),contains("Активирован профиль"),any());
+        verify(api).send(eq(456L),contains("активация не подтверждена"),isNull());
+    }
+    @Test public void repeatInstallButtonDoesNotRedownloadOneTimeCode() throws Exception {
+        LpaClient adapter=beginEsim("LPA:1$smdp.example$MATCH");String nonce=new JSONObject(values.get("draft:456")).getString("nonce");
+        confirmEsim();updates(callback("confirm:"+nonce));bot.poll(api,0);
+        verify(adapter,times(1)).download(anyString(),anyString());
+    }
+    @Test public void requiredConfirmationCodeCanBeAddedBeforeConsumingDraft() throws Exception {
+        LpaClient adapter=beginEsim("LPA:1$smdp.example$MATCH$$1");confirmEsim();
+        verify(adapter,never()).download(anyString(),anyString());assertEquals("confirm_add",new JSONObject(values.get("draft:456")).getString("stage"));
+        updates(message("/pin 9876",456,"private"));bot.poll(api,0);confirmEsim();
+        verify(adapter).download("LPA:1$smdp.example$MATCH$$1","9876");
+    }
 
 }
