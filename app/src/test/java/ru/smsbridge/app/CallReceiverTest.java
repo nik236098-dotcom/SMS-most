@@ -52,7 +52,7 @@ public class CallReceiverTest {
     }
     private void event(String state,String number,boolean numberExtra) {receive(state,number,numberExtra,7,0);}
     @Test public void incomingCallerIdIsQueuedImmediatelyAndRestartsService() throws Exception {
-        event("RINGING","+79991234567",true);assertEquals(1,delivered.size());JSONObject p=delivered.get(0);
+        event("RINGING","+79991234567",true);assertEquals(values.toString(),1,delivered.size());JSONObject p=delivered.get(0);
         assertEquals("call",p.getString("kind"));assertEquals("+79991234567",p.getString("sender"));
         assertEquals("+79990000001",p.getString("recipient"));assertEquals(7,p.getInt("sub_id"));assertEquals(1,starts);
         assertTrue(p.getLong("received")>0);
@@ -95,12 +95,12 @@ public class CallReceiverTest {
     }
     @Test public void singleActiveSimCanFillMissingPhoneStateExtras() {
         SubscriptionManager manager=mock(SubscriptionManager.class);when(context.getSystemService(SubscriptionManager.class)).thenReturn(manager);
-        when(manager.getActiveSubscriptionInfoList()).thenReturn(Collections.singletonList(sim(7,0)));
+        List<SubscriptionInfo> sims=Collections.singletonList(sim(7,0));when(manager.getActiveSubscriptionInfoList()).thenReturn(sims);
         receive("RINGING","+79991234567",true,-1,-1);assertEquals(7,delivered.get(0).optInt("sub_id"));
     }
     @Test public void multipleSimsWithoutExtrasDoNotGuessDestinationNumber() throws Exception {
         SubscriptionManager manager=mock(SubscriptionManager.class);when(context.getSystemService(SubscriptionManager.class)).thenReturn(manager);
-        when(manager.getActiveSubscriptionInfoList()).thenReturn(Arrays.asList(sim(7,0),sim(8,1)));
+        List<SubscriptionInfo> sims=Arrays.asList(sim(7,0),sim(8,1));when(manager.getActiveSubscriptionInfoList()).thenReturn(sims);
         receive("RINGING","+79991234567",true,-1,-1);assertTrue(delivered.get(0).getString("recipient").contains("не определён"));
         verify(store,never()).recipient(anyInt(),anyInt());
     }

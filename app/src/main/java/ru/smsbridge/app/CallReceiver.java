@@ -16,7 +16,7 @@ public final class CallReceiver extends BroadcastReceiver {
         Store store=BridgeApp.store();boolean queued=false;
         try {
             String state=intent.getStringExtra(TelephonyManager.EXTRA_STATE);
-            if(!TelephonyManager.EXTRA_STATE_RINGING.equals(state)&&!TelephonyManager.EXTRA_STATE_OFFHOOK.equals(state)&&!TelephonyManager.EXTRA_STATE_IDLE.equals(state))return;
+            if(!"RINGING".equals(state)&&!"OFFHOOK".equals(state)&&!"IDLE".equals(state))return;
             store.put("call_last_broadcast",""+System.currentTimeMillis());
             store.put("call_receive_error","");store.put("call_sim_warning","");
             if(!store.running()||!store.callsEnabled()) {store.put("call_result","Уведомления о звонках остановлены");return;}
@@ -58,7 +58,7 @@ public final class CallReceiver extends BroadcastReceiver {
                         .put("received",next.getLong("received")).put("sub_id",next.optInt("sub",-1)).put("slot",next.optInt("slot",-1));
                 }
                 store.saveCall(key,next,payload);queued=payload!=null;
-                if(!queued&&TelephonyManager.EXTRA_STATE_RINGING.equals(state)&&!next.optBoolean("notified"))
+                if(!queued&&"RINGING".equals(state)&&!next.optBoolean("notified"))
                     store.put("call_result","Входящий звонок: ожидается номер абонента");
             }
             if(queued)try{RelayService.start(context);}catch(RuntimeException ignored){ /* Persisted queue survives a rejected foreground start. */ }
