@@ -1,23 +1,30 @@
-Проверка исходников 2026-10-04
+Проверка SMS Мост v0.2.0, 2026-10-04
 
-Команда: bash tools/test_core.sh
-Passed 36 core checks
-Syntax parsed: 14 Java files (no Android type checking)
-Syntax parsed: 3 Java files (no Android type checking)
-Manifest, resources and permission checks passed
-Python-скрипты прошли py_compile. Workflow YAML разобран PyYAML.
+Коммит кода: 89a87579e67484c0d6cd531424b3c639014ddb61
+GitHub Actions: https://github.com/nik236098-dotcom/SMS-most/actions/runs/37208083875
+assembleDebug, assembleRelease, lintDebug, testDebugUnitTest: успешно.
+JUnit BotSetupTest: 10 тестов, 0 ошибок, 0 пропущенных.
+Проверены ответ /start до привязки, автоматическая привязка по коду,
+неверный код, запрет постороннего аккаунта/группы/подменённого отправителя,
+ответ второму разрешённому ID именно в его чат, работа без разрешения SMS,
+остановка бота и понятная ошибка сети.
+Core: 58 проверок. SQLite: 5 проверок реального запроса очереди,
+порядок SMS внутри получателя и независимость очередей разных ID.
+Lint: 0 ошибок, 7 предупреждений (OldTargetApi, DataExtractionRules,
+UnnecessaryRequiredFeature, SetTextI18n четырежды).
 
-GitHub Actions: assembleDebug и lintDebug прошли успешно.
-https://github.com/nik236098-dotcom/SMS-most/actions/runs/37179508385
-Коммит кода: 7fdf6f87bf8f3d8a81d9c72632f5a5db2051784b
-Lint: 0 ошибок, 5 предупреждений (OldTargetApi, DataExtractionRules,
-UnnecessaryRequiredFeature, SetTextI18n дважды).
-Проверены checksum артефакта, целостность ZIP, APK v2 RSA SHA256-подпись
-и подписанный digest содержимого APK; изменение байта нарушает проверку.
-APK SHA256: f1009de669814068605cd7cda547f334a353d0c729c6be2a53b85962d13580b2
+Доставляемый SMS-Most-v0.2.apk — release, подписан отдельным постоянным
+ключом RSA 3072, не сохранённым в репозитории. apksigner verify:
+Verified using v3 scheme: true; ZIP CRC и структура APK проверены.
+Сертификат SHA256: 6b43d7e3982b0951bb3e3f758f6a6234fdabc8a6133fca54f230af63a5c005de
+APK SHA256: 9723af79ff98d2de332ba40641c5a1ba05b2c775462bb7aba3cff38d445ca264
+Проверены SHA256 обоих архивов GitHub Actions перед извлечением.
+Debug APK из CI подписан временным ключом runner и отличается от доставленного APK.
+Для перехода с v0.1 требуется удалить старое приложение;
+при удалении его настройки и очередь теряются.
 
-НЕ ВЫПОЛНЕНЫ: установка APK, проверка интерфейса на
-Xiaomi, Telegram с реальным ботом, приём SMS, сборка LPA-компонента,
-авторизация Community Key на 9eSIM V0, загрузка и переключение eSIM.
-Адаптер пользователя ещё не получен. Первая сборка не включает LPA-компонент
-и pin его подписи, поэтому удалённая установка eSIM пока недоступна.
+НЕ ВЫПОЛНЕНЫ: установка на Xiaomi, проверка интерфейса на устройстве,
+Telegram с реальным ботом, приём SMS на SIM, сборка LPA-компонента,
+авторизация Community Key на 9eSIM V0, установка и переключение eSIM.
+Текущий APK не включает работающий LPA-компонент и pin его подписи;
+удалённая установка eSIM недоступна. Адаптер ещё не получен.
