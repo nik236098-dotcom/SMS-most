@@ -43,7 +43,7 @@ public final class RelayService extends Service {
         super.onCreate();Store s=BridgeApp.store();
         if(!s.running()){stopSelf();return;}
         try {
-            getSystemService(NotificationManager.class).createNotificationChannel(new NotificationChannel("relay","Пересылка SMS",NotificationManager.IMPORTANCE_LOW));
+            getSystemService(NotificationManager.class).createNotificationChannel(new NotificationChannel("relay","SMS и входящие звонки",NotificationManager.IMPORTANCE_LOW));
             Notification n=notification();
             if(Build.VERSION.SDK_INT>=34)startForeground(7702,n,ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE);else startForeground(7702,n);
             s.put("service_start_error","");
@@ -61,7 +61,7 @@ public final class RelayService extends Service {
         PendingIntent open=PendingIntent.getActivity(this,0,new Intent(this,MainActivity.class),PendingIntent.FLAG_IMMUTABLE|PendingIntent.FLAG_UPDATE_CURRENT);
         PendingIntent stop=PendingIntent.getService(this,1,new Intent(this,RelayService.class).setAction("STOP"),PendingIntent.FLAG_IMMUTABLE|PendingIntent.FLAG_UPDATE_CURRENT);
         return new Notification.Builder(this,"relay").setSmallIcon(ru.smsbridge.app.R.drawable.ic_bridge).setContentTitle("SMS Мост · бот запущен")
-            .setContentText(BridgeApp.store().chat()==0?"Ожидает код от получателя в Telegram":"SMS в Telegram · в очереди: "+BridgeApp.store().pending()).setOngoing(true).setContentIntent(open)
+            .setContentText(BridgeApp.store().chat()==0?"Ожидает код от получателя в Telegram":"SMS и звонки в Telegram · в очереди: "+BridgeApp.store().pending()).setOngoing(true).setContentIntent(open)
             .addAction(new Notification.Action.Builder(null,"Остановить",stop).build()).build();
     }
     private void deviceStatus() {
@@ -73,7 +73,7 @@ public final class RelayService extends Service {
         BridgeApp.store().put("device_status",Build.MODEL+" · "+(online?(nc.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)?"Wi-Fi":"мобильный интернет"):"нет интернета")+" · "+(plugged?"на зарядке":"батарея "+level+"%"));
     }
     @Override public int onStartCommand(Intent i,int flags,int id) {
-        if(i!=null&&"STOP".equals(i.getAction())){BridgeApp.store().put("enabled","false");BridgeApp.store().put("bot_enabled","false");stopSelf();return START_NOT_STICKY;}
+        if(i!=null&&"STOP".equals(i.getAction())){BridgeApp.store().put("enabled","false");BridgeApp.store().put("bot_enabled","false");BridgeApp.store().resetCalls();stopSelf();return START_NOT_STICKY;}
         if(!BridgeApp.store().running()){stopSelf();return START_NOT_STICKY;}return START_STICKY;
     }
     @Override public IBinder onBind(Intent i){return null;}

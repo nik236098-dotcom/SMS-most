@@ -39,6 +39,21 @@ final class Store extends SQLiteOpenHelper {
         } catch (Exception e) { throw new IllegalStateException("Не удалось сохранить настройки", e); }
     }
     boolean smsPermission() { return context.checkSelfPermission(android.Manifest.permission.RECEIVE_SMS)==android.content.pm.PackageManager.PERMISSION_GRANTED; }
+    boolean phonePermission() { return context.checkSelfPermission(android.Manifest.permission.READ_PHONE_STATE)==android.content.pm.PackageManager.PERMISSION_GRANTED; }
+    boolean callLogPermission() { return context.checkSelfPermission(android.Manifest.permission.READ_CALL_LOG)==android.content.pm.PackageManager.PERMISSION_GRANTED; }
+    boolean callsEnabled() { return get("calls_enabled","true").equals("true"); }
+    synchronized void resetCalls() {getWritableDatabase().delete("settings","k LIKE 'call_state:%'",null);}
+    synchronized void saveCall(String key,JSONObject next,JSONObject payload) throws Exception {
+        SQLiteDatabase db=getWritableDatabase();db.beginTransaction();
+        try {
+            if(payload!=null) {
+                enqueue("call|"+next.getString("event"),payload);
+                next.put("notified",true).put("notify",false);
+                put("call_last_saved",""+System.currentTimeMillis());put("call_result","Входящий звонок сохранён в очередь Telegram");
+            }
+            put(key,next.toString());db.setTransactionSuccessful();
+        } finally {db.endTransaction();}
+    }
     // Permission can change in Android settings while the bot keeps running.
     // The legacy "enabled" preference is not a live permission check.
     synchronized boolean enabled() { return running() && smsPermission(); }
@@ -180,10 +195,14 @@ final class Store extends SQLiteOpenHelper {
             while(c.moveToNext())out.put(new JSONObject(Crypto.open(c.getString(1))).put("id",c.getLong(0)).put("state",c.getString(2)).put("error",c.getString(3)));
         }return out;
     }
-    synchronized JSONArray recent(long target) throws Exception {
+    synchronized JSONArray recent(long target) throws Exception {return recent(target,null);}
+    synchronized JSONArray recent(long target,String kind) throws Exception {
         JSONArray out = new JSONArray();
-        try (Cursor c = getReadableDatabase().rawQuery("SELECT id,payload,state,error FROM outbox WHERE route=? ORDER BY id DESC LIMIT 10", new String[]{route(target)})) {
-            while(c.moveToNext()) out.put(new JSONObject(Crypto.open(c.getString(1))).put("id",c.getLong(0)).put("state",c.getString(2)).put("error",c.getString(3)));
+        try (Cursor c = getReadableDatabase().rawQuery("SELECT id,payload,state,error FROM outbox WHERE route=? ORDER BY id DESC", new String[]{route(target)})) {
+            while(out.length()<10 && c.moveToNext()) {
+                JSONObject p=new JSONObject(Crypto.open(c.getString(1)));
+                if(kind==null||p.optString("kind","sms").equals(kind))out.put(p.put("id",c.getLong(0)).put("state",c.getString(2)).put("error",c.getString(3)));
+            }
         } return out;
     }
     synchronized void retry() { getWritableDatabase().execSQL("UPDATE outbox SET next_try=0 WHERE state='pending'"); }

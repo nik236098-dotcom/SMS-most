@@ -22,7 +22,7 @@ final class SmsDiagnostics {
         }
         return result;
     }
-    private static String time(String value) {
+    static String time(String value) {
         try {long t=Long.parseLong(value);return t>0?new SimpleDateFormat("dd.MM HH:mm:ss",Locale.getDefault()).format(new Date(t)):"пока не было";}
         catch(NumberFormatException e){return "неизвестно";}
     }

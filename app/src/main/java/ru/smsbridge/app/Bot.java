@@ -84,6 +84,7 @@ final class Bot {
             if(data.equals("menu")){ menu(t,m);return; }
             if(data.equals("status")){ show(t,m,status(),keyboard(button("Назад","menu")));return; }
             if(data.equals("last")){ recent(t,m);return; }
+            if(data.equals("calls")){recentCalls(t,m);return;}
             if(data.equals("test")){t.send(replyTo(),"✅ Бот отвечает. Телефон: "+s.get("device_status","")+"\nПересылка SMS: "+(s.enabled()?"включена":"выключена — проверь разрешение SMS на Android"),null);return;}
             if(data.equals("profiles")){ profiles(t,m);return; }
             if(data.equals("adapter")){adapterProfiles(t,m);return;}
@@ -100,6 +101,7 @@ final class Bot {
         if(text.equals("/start")||text.equals("/menu")){s.put(draftKey(),"{}");menu(t,null);return;}
         if(text.equals("/cancel")){s.put(draftKey(),"{}");menu(t,null);return;}
         if(text.equals("/status")){t.send(replyTo(),status(),null);return;}
+        if(text.equals("/calls")){recentCalls(t,null);return;}
         if(text.equals("/profiles")){profiles(t,null);return;}
         if(text.equals("/esim")||text.equals("/9esim")){s.put(draftKey(),"{}");adapterProfiles(t,null);return;}
         if(text.equals("/add")){beginAdd(t,null);return;}
@@ -306,15 +308,26 @@ final class Bot {
         p.put("reply_markup",keyboard==null?new JSONObject().put("inline_keyboard",new JSONArray()):keyboard);
         try {t.call("editMessageText",p);}catch(Telegram.ApiError e){if(e.code!=400)throw e;}
     }
-    private void menu(Telegram t,JSONObject m) throws Exception {show(t,m,"SMS Мост\n"+status(),keyboard(button("Проверить связь","test"),button("Статус телефона","status"),button("Последние SMS","last"),button("Мои SIM-карты","profiles"),button("Профили 9eSIM","adapter")));}
-    private String status() {return "Телефон на связи\n"+SmsDiagnostics.report(s)+"\nОтправлено сегодня: "+s.today()+"\nВ очереди: "+s.pending()+"\n"+s.get("device_status","");}
+    private void menu(Telegram t,JSONObject m) throws Exception {show(t,m,"SMS Мост\n"+status(),keyboard(button("Проверить связь","test"),button("Статус телефона","status"),button("Последние SMS","last"),button("Входящие звонки","calls"),button("Мои SIM-карты","profiles"),button("Профили 9eSIM","adapter")));}
+    private String status() {return "Телефон на связи\n"+SmsDiagnostics.report(s)+"\n\n"+CallDiagnostics.report(s)+"\nОтправлено сегодня: "+s.today()+"\nВ очереди: "+s.pending()+"\n"+s.get("device_status","");}
     private void recent(Telegram t,JSONObject m) throws Exception {
-        StringBuilder b=new StringBuilder("Последние SMS\n");JSONArray rows=s.recent(replyTo());
+        StringBuilder b=new StringBuilder("Последние SMS\n");JSONArray rows=s.recent(replyTo(),"sms");
         for(int i=0;i<rows.length();i++){JSONObject p=rows.getJSONObject(i);b.append("\n#").append(p.getLong("id")).append(" · ").append(p.optString("recipient")).append("\n")
             .append(Rules.service(p.optString("sender"))).append(" · ").append(p.optString("state").equals("sent")?"Доставлено":"В очереди").append("\n");}
         show(t,m,b.toString(),keyboard(button("Назад","menu")));
     }
+    private void recentCalls(Telegram t,JSONObject m) throws Exception {
+        StringBuilder text=new StringBuilder("Входящие звонки\n\n").append(CallDiagnostics.report(s));JSONArray rows=s.recent(replyTo(),"call");
+        if(rows.length()==0)text.append("\n\nСохранённых звонков пока нет.");
+        for(int i=0;i<rows.length();i++) {
+            JSONObject p=rows.getJSONObject(i);text.append("\n\n📞 ").append(p.optString("sender"))
+                .append("\nНа номер: ").append(p.optString("recipient")).append("\n").append(SmsDiagnostics.time(p.optString("received","0")))
+                .append(" · ").append(p.optString("state").equals("sent")?"Доставлено":"В очереди");
+        }
+        show(t,m,text.toString(),keyboard(button("Обновить","calls"),button("Назад","menu")));
+    }
     static String header(JSONObject p) {
+        if(p.optString("kind").equals("call"))return "📞 Входящий звонок #"+p.optLong("id")+"\n\n📲 На номер: "+p.optString("recipient","Номер не определён")+"\nАбонент: "+p.optString("sender")+"\n\n";
         return "📩 Новое SMS #"+p.optLong("id")+"\n\n📲 На номер: "+p.optString("recipient","Номер не определён")+"\n🏷 Сервис: "+Rules.service(p.optString("sender"))+
             "\nОтправитель: "+p.optString("sender")+"\n\n";
     }

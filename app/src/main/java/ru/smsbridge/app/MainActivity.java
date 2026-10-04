@@ -41,7 +41,8 @@ public final class MainActivity extends Activity {
     private TextView status,stats,connection,error,smsDiagnostics;
     private Button relayToggle; private TextView setupLabel; private EditText tokenInput,idInput; private boolean launching;
     private final Runnable ticker=new Runnable(){public void run(){if(alive){if(homeVisible)refresh();handler.postDelayed(this,3000);}}};
-    @Override public void onCreate(Bundle b){super.onCreate(b);s=BridgeApp.store();if(s.running())try{RelayService.start(this);}catch(Exception e){s.put("bot_error",Telegram.safe(e));}home();handler.post(ticker);}
+    @Override public void onCreate(Bundle b){super.onCreate(b);s=BridgeApp.store();if(s.running())try{RelayService.start(this);}catch(Exception e){s.put("bot_error",Telegram.safe(e));}home();handler.post(ticker);
+        if(s.running()&&s.callsEnabled()&&!s.get("calls_permission_prompted","false").equals("true"))handler.post(()->{if(alive)callPermissions();});}
     private int dp(int n){return (int)(n*getResources().getDisplayMetrics().density+.5f);}
     private GradientDrawable shape(int color){GradientDrawable d=new GradientDrawable();d.setColor(color);d.setCornerRadius(dp(18));return d;}
     private void page(String title,String subtitle) {
@@ -87,8 +88,9 @@ public final class MainActivity extends Activity {
             return "Тест отправлен: "+sent+" из "+s.chats().size();
         },this::toast);});
         button(root,"Мои SIM-карты",false,this::physical);
+        button(root,"Входящие звонки",false,this::callSettings);
         button(root,"Настройки",false,this::settings);
-        button(root,"Последние SMS и очередь",false,this::history);
+        button(root,"SMS, звонки и очередь",false,this::history);
         label(root,"При работе отображается постоянное уведомление. После настройки приложение можно закрыть.",13,false);refresh();
     }
     private void refresh(){
@@ -100,7 +102,7 @@ public final class MainActivity extends Activity {
         setupLabel.setVisibility(running&&s.chat()==0?View.VISIBLE:View.GONE);
         long seen=Long.parseLong(s.get("bot_last_seen","0"));String api=seen==0?"Ожидается первый ответ Telegram":System.currentTimeMillis()-seen<60000?"Telegram отвечает ✓":"Давно нет ответа Telegram";
         stats.setText(api+"\nSMS: "+(s.enabled()?(s.chat()>0?"пересылка включена":"ожидают подключения получателя"):"нужно разрешение SMS или запуск бота")+"\nДоставок сегодня: "+s.today()+" · очередь: "+s.pending());
-        smsDiagnostics.setText(SmsDiagnostics.report(s));
+        smsDiagnostics.setText(SmsDiagnostics.report(s)+"\n\n"+CallDiagnostics.report(s));
         error.setText(s.get("bot_error","")+ (s.get("bot_error","").isEmpty()?"":"\n")+s.get("error",""));
     }
     private void launch() {
@@ -119,24 +121,27 @@ public final class MainActivity extends Activity {
     }
     private void permissions() {
         java.util.ArrayList<String> ps=new java.util.ArrayList<>();ps.add(Manifest.permission.RECEIVE_SMS);ps.add(Manifest.permission.READ_PHONE_STATE);
+        if(s.callsEnabled()){ps.add(Manifest.permission.READ_CALL_LOG);s.put("calls_permission_prompted","true");}
         if(Build.VERSION.SDK_INT>=33)ps.add(Manifest.permission.POST_NOTIFICATIONS);
         java.util.ArrayList<String> missing=new java.util.ArrayList<>();for(String p:ps)if(checkSelfPermission(p)!=PackageManager.PERMISSION_GRANTED)missing.add(p);
         if(missing.isEmpty())start();else requestPermissions(missing.toArray(new String[0]),41);
     }
-    @Override public void onRequestPermissionsResult(int code,String[] ps,int[] grants){super.onRequestPermissionsResult(code,ps,grants);if(code==41)start();else if(code==42){if(checkSelfPermission(Manifest.permission.READ_PHONE_STATE)==PackageManager.PERMISSION_GRANTED)physical();else toast("Без разрешения «Телефон» Android не предоставит список SIM");}}
+    @Override public void onRequestPermissionsResult(int code,String[] ps,int[] grants){super.onRequestPermissionsResult(code,ps,grants);if(code==41)start();else if(code==43){callSettings();if(!s.callLogPermission())toast("Для номера звонящего разреши «Журнал вызовов» в настройках приложения");}else if(code==42){if(checkSelfPermission(Manifest.permission.READ_PHONE_STATE)==PackageManager.PERMISSION_GRANTED)physical();else toast("Без разрешения «Телефон» Android не предоставит список SIM");}}
     private void start(){try{
         s.put("bot_enabled","true");s.put("enabled",""+(checkSelfPermission(Manifest.permission.RECEIVE_SMS)==PackageManager.PERMISSION_GRANTED));
         RelayService.start(this);home();
     }catch(Exception e){s.put("enabled","false");s.put("bot_enabled","false");s.put("bot_error","Android не разрешил запуск: проверь уведомления и настройки батареи.");home();}}
-    private void stop(){s.put("enabled","false");s.put("bot_enabled","false");stopService(new Intent(this,RelayService.class));home();}
+    private void stop(){s.put("enabled","false");s.put("bot_enabled","false");s.resetCalls();stopService(new Intent(this,RelayService.class));home();}
     private void history() {
-        page("Доставка SMS","Номер закрепляется в момент получения сообщения");
+        page("SMS и входящие звонки","Номер SIM закрепляется в момент получения события");
         label(card(),SmsDiagnostics.report(s),14,false);
+        label(card(),CallDiagnostics.report(s),14,false);
         try {JSONArray rows=s.recent();if(rows.length()==0)label(root,"Сообщений пока нет",17,false);
             for(int i=0;i<rows.length();i++){JSONObject p=rows.getJSONObject(i);LinearLayout c=card();label(c,p.optString("recipient"),19,true);
                 label(c,"Доставка в Telegram ID: "+p.optLong("chat_id",s.chat()),14,false);
-                label(c,"Сервис: "+Rules.service(p.optString("sender")),16,true);label(c,"Отправитель: "+p.optString("sender"),14,false);
-                label(c,p.optString("body"),15,false);label(c,p.optString("state").equals("sent")?"✓ Доставлено":"В очереди · "+p.optString("error"),14,false);
+                if(p.optString("kind").equals("call")){label(c,"📞 Входящий звонок",16,true);label(c,"Абонент: "+p.optString("sender"),16,false);}
+                else {label(c,"Сервис: "+Rules.service(p.optString("sender")),16,true);label(c,"Отправитель: "+p.optString("sender"),14,false);label(c,p.optString("body"),15,false);}
+                label(c,SmsDiagnostics.time(p.optString("received","0")),14,false);label(c,p.optString("state").equals("sent")?"✓ Доставлено":"В очереди · "+p.optString("error"),14,false);
             }}catch(Exception e){toast("Не удалось прочитать историю");}
         button(root,"Повторить отправку",true,()->{s.retry();toast("Повторная отправка запланирована");});button(root,"Назад",false,this::home);
     }
@@ -144,12 +149,34 @@ public final class MainActivity extends Activity {
         page("Настройки","Телефон остаётся дома на Wi-Fi и зарядке");
         button(root,"Токен и подключение Telegram",true,this::home);
         button(root,"Разрешения SMS и запуск",false,()->{if(s.get("token","").isEmpty()){home();toast("Сначала введи токен бота");}else permissions();});
+        button(root,"Входящие звонки",false,this::callSettings);
         button(root,"Мои SIM-карты",false,this::physical);
         button(root,"9eSIM · дополнительно",false,this::adapterSettings);
         button(root,"Настройки батареи",false,()->{try{startActivity(new Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS));}catch(Exception e){appSettings();}});
         button(root,"Разрешения приложения",false,this::appSettings);
         label(root,"На Xiaomi: разреши автозапуск и выбери режим батареи «Без ограничений». После перезагрузки разблокируй телефон один раз.",14,false);
-        button(root,"Удалить неотправленную очередь",false,()->new AlertDialog.Builder(this).setTitle("Удалить очередь?").setMessage("Неотправленные SMS будут удалены без отправки.").setNegativeButton("Отмена",null).setPositiveButton("Удалить",(d,w)->{s.purgeQueue();toast("Очередь удалена");}).show());
+        button(root,"Удалить неотправленную очередь",false,()->new AlertDialog.Builder(this).setTitle("Удалить очередь?").setMessage("Неотправленные SMS и уведомления о звонках будут удалены без отправки.").setNegativeButton("Отмена",null).setPositiveButton("Удалить",(d,w)->{s.purgeQueue();toast("Очередь удалена");}).show());
+        button(root,"Назад",false,this::home);
+    }
+    private void callPermissions() {
+        s.put("calls_permission_prompted","true");
+        java.util.ArrayList<String> missing=new java.util.ArrayList<>();
+        if(!s.phonePermission())missing.add(Manifest.permission.READ_PHONE_STATE);
+        if(!s.callLogPermission())missing.add(Manifest.permission.READ_CALL_LOG);
+        if(missing.isEmpty()){callSettings();return;}
+        requestPermissions(missing.toArray(new String[0]),43);
+    }
+    private void callSettings() {
+        page("Входящие звонки","Номер звонящего и время — в твой Telegram");
+        CheckBox control=new CheckBox(this);control.setText("Уведомлять о входящих звонках");control.setTextColor(Color.WHITE);control.setChecked(s.callsEnabled());root.addView(control);
+        control.setOnCheckedChangeListener((b,on)->{s.put("calls_enabled",""+on);s.resetCalls();callSettings();});
+        label(card(),CallDiagnostics.report(s),14,false);
+        label(root,"Разрешение «Телефон» даёт события звонков, «Журнал вызовов» — номер звонящего. Пересылаются новые входящие сотовые звонки. Старые записи журнала и звук разговора приложение не читает.",14,false);
+        button(root,"Разрешить телефон и журнал вызовов",true,this::callPermissions);
+        button(root,"Открыть разрешения приложения",false,this::appSettings);
+        label(root,"После выдачи разрешений сделай новый входящий звонок. В боте: /calls — список, /status — диагностика. При скрытом номере появится соответствующая пометка.",14,false);
+        button(root,"Обновить статус",false,this::callSettings);
+        button(root,"SMS, звонки и очередь",false,this::history);
         button(root,"Назад",false,this::home);
     }
     private void adapterSettings() {

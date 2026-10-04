@@ -173,4 +173,15 @@ public class BotSetupTest {
         verify(adapter).download("LPA:1$smdp.example$MATCH$$1","9876");
     }
 
+    @Test public void callsCommandShowsCallerAndRecipientWithoutReadingSimAdapter() throws Exception {
+        owner=456;when(s.recent(456L,"call")).thenReturn(new JSONArray().put(new JSONObject()
+            .put("sender","+79991234567").put("recipient","+79997654321").put("received",1780000000000L).put("state","sent")));
+        updates(message("/calls",456,"private"));bot.poll(api,0);
+        verify(api).send(eq(456L),argThat(text->text.contains("Входящие звонки")&&text.contains("+79991234567")&&text.contains("+79997654321")),notNull());
+    }
+    @Test public void emptyCallsHistoryExplainsPermissions() throws Exception {
+        owner=456;when(s.recent(456L,"call")).thenReturn(new JSONArray());updates(message("/calls",456,"private"));bot.poll(api,0);
+        verify(api).send(eq(456L),argThat(text->text.contains("Сохранённых звонков пока нет")&&text.contains("Журнал вызовов")),notNull());
+    }
+
 }

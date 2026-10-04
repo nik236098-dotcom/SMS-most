@@ -13,7 +13,7 @@ final class SmsText {
     static List<JSONObject> messages(JSONObject sms,long chat) throws Exception {
         String body=sms.optString("body"),text=Bot.format(sms);int bodyStart=Bot.header(sms).length();
         List<int[]> codes=new ArrayList<>();Matcher matcher=CODE.matcher(body);
-        while(matcher.find())codes.add(new int[]{bodyStart+matcher.start(),bodyStart+matcher.end()});
+        if(!sms.optString("kind").equals("call"))while(matcher.find())codes.add(new int[]{bodyStart+matcher.start(),bodyStart+matcher.end()});
         List<JSONObject> result=new ArrayList<>();int start=0;
         while(start<text.length()) {
             int end=Math.min(start+3700,text.length());
