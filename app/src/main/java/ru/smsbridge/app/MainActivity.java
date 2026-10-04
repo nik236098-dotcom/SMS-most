@@ -156,7 +156,9 @@ public final class MainActivity extends Activity {
         page("9eSIM · дополнительно","Обычные SIM и пересылка SMS работают без этого компонента");
         CheckBox control=new CheckBox(this);control.setText("Разрешить управление моим адаптером 9eSIM из привязанного Telegram-чата");control.setTextColor(Color.WHITE);control.setChecked(s.get("esim_control","false").equals("true"));root.addView(control);
         control.setOnCheckedChangeListener((b,on)->{s.put("esim_control",""+on);if(!on)s.clearActive();});
-        label(root,new LpaClient(this).installed()?"Компонент 9eSIM обнаружен":"Компонент 9eSIM не установлен. Установка профилей пока недоступна.",14,false);
+        label(root,new LpaClient(this).installed()?"Управление 9eSIM встроено в приложение":"Встроенное управление недоступно в этой сборке",14,false);
+        button(root,"Открыть управление 9eSIM",true,()->{try{startActivity(new Intent().setClassName(getPackageName(),"im.angry.openeuicc.ui.UnprivilegedMainActivity"));}catch(Exception e){toast("Управление картой доступно в объединённой сборке");}});
+        label(root,"Добавление через бота: /add → введи номер → отправь QR-код или строку LPA → подтверди установку. Номер сохранится за профилем.",14,false);
         button(root,"Проверить адаптер",false,()->background(()->{LpaClient l=new LpaClient(this);JSONObject c=l.card();l.refresh(s);return "Адаптер обнаружен, слот "+(c.getInt("slot")+1);},this::toast));
         button(root,"Назад",false,this::settings);
     }

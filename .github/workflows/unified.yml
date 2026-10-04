@@ -1,0 +1,50 @@
+name: Build unified SMS and eSIM APK
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'app/**'
+      - 'adapter/**'
+      - 'tools/build_unified.py'
+      - '.github/workflows/unified.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  unified:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: 'platform-tools'
+          log-accepted-android-sdk-licenses: false
+      - name: Install native Android build dependencies
+        run: sdkmanager 'platforms;android-34' 'platforms;android-35' 'build-tools;35.0.0' 'ndk;26.1.10909125'
+      - name: Check relay core
+        run: bash tools/test_core.sh
+      - name: Build source-integrated LPA and run tests
+        run: python3 tools/build_unified.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SMS-Most-Unified-APK
+          path: dist/SMS-Most-Unified-unsigned.apk
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SMS-Most-Unified-source
+          path: dist/SMS-Most-Unified-source.tar.gz
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: SMS-Most-Unified-validation
+          path: |
+            vendor/openeuicc/app-unpriv/build/reports/
+            vendor/openeuicc/app-unpriv/build/test-results/
+          if-no-files-found: ignore

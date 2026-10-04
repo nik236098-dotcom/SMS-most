@@ -8,7 +8,7 @@ import org.json.JSONObject;
 import java.util.HashMap;
 import java.util.Map;
 
-/** Connects only to the protected companion built by tools/build_companion.py. */
+/** Uses the private in-app provider; external providers require an explicitly pinned certificate. */
 final class LpaClient {
     private final Context context;
     LpaClient(Context c) { context=c.getApplicationContext(); }
@@ -17,7 +17,7 @@ final class LpaClient {
         if(!installed()) throw new UserError("Компонент управления 9eSIM ещё не установлен. Пересылка SMS работает отдельно.");
         android.content.pm.ProviderInfo provider=context.getPackageManager().resolveContentProvider("ru.smsbridge.lpa",0);
         String pin=BuildConfig.LPA_SIGNER_SHA256;
-        if(pin.isEmpty() || !context.getPackageManager().hasSigningCertificate(provider.packageName,hex(pin),android.content.pm.PackageManager.CERT_INPUT_SHA256))
+        if(!provider.packageName.equals(context.getPackageName()) && (pin.isEmpty() || !context.getPackageManager().hasSigningCertificate(provider.packageName,hex(pin),android.content.pm.PackageManager.CERT_INPUT_SHA256)))
             throw new UserError("Подпись компонента 9eSIM не подтверждена. Нужна согласованная сборка двух APK.");
         Uri.Builder u=new Uri.Builder().scheme("content").authority("ru.smsbridge.lpa").appendPath(action);
         for(Map.Entry<String,String> e:args.entrySet()) u.appendQueryParameter(e.getKey(),e.getValue());
@@ -27,9 +27,16 @@ final class LpaClient {
             int error=c.getColumnIndex("error");if(error>=0 && c.getString(error)!=null) throw new UserError("Адаптер отклонил операцию. Откройте компонент 9eSIM на телефоне.");
             int rows=c.getColumnIndex("rows"); if(rows<0) throw new UserError("Несовместимая версия компонента 9eSIM");
             JSONArray data=new JSONArray(c.getString(rows));
-            for(int i=0;i<data.length();i++) if(data.getJSONObject(i).has("error")) throw new UserError("Адаптер не выполнил операцию. Проверь список профилей перед повтором.");
+            for(int i=0;i<data.length();i++) if(data.getJSONObject(i).has("error")) {
+                String code=data.getJSONObject(i).optString("error");
+                throw new UserError(code.equals("phone_permission_required")?"Разреши доступ к телефону в SMS Мост, затем открой встроенное управление 9eSIM":
+                    code.equals("card_access_denied")?"Нет доступа к карте: открой встроенное управление 9eSIM и проверь слот адаптера":
+                    code.equals("profile_download_failed")?"Оператор отклонил загрузку eSIM или сервер недоступен. Проверь профиль во встроенном управлении; не отправляй QR повторно автоматически":
+                    code.equals("adapter_busy_or_reconnecting")?"Адаптер занят или переподключается. Подожди и обнови список профилей":
+                    "Адаптер не выполнил операцию. Открой встроенное управление 9eSIM и проверь профили перед повтором.");
+            }
             return data;
-        } catch(SecurityException e) { throw new UserError("Компоненты приложения собраны с разными ключами. Нужна согласованная сборка."); }
+        } catch(SecurityException e) { throw new UserError("Доступ к адаптеру отклонён Android. Проверь разрешение «Телефон» и совместимость карты во встроенном управлении."); }
     }
     private static byte[] hex(String text) {byte[] out=new byte[text.length()/2];for(int i=0;i<out.length;i++)out[i]=(byte)Integer.parseInt(text.substring(i*2,i*2+2),16);return out;}
     JSONArray cards() throws Exception { return query("cards",new HashMap<>()); }

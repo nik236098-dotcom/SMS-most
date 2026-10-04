@@ -1,0 +1,132 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+package ru.smsbridge.adapter
+
+import android.Manifest
+import android.content.*
+import android.content.pm.PackageManager
+import android.database.Cursor
+import android.database.MatrixCursor
+import android.net.Uri
+import android.os.Binder
+import android.os.IBinder
+import android.os.PowerManager
+import im.angry.openeuicc.OpenEuiccApplication
+import im.angry.openeuicc.core.EuiccChannel
+import im.angry.openeuicc.core.EuiccChannelManager
+import im.angry.openeuicc.service.EuiccChannelManagerService
+import im.angry.openeuicc.service.EuiccChannelManagerService.Companion.waitDone
+import im.angry.openeuicc.util.LPAString
+import kotlinx.coroutines.*
+import kotlinx.coroutines.flow.toList
+import net.typeblog.lpac_jni.LocalProfileInfo
+import org.json.JSONArray
+import org.json.JSONObject
+
+/** Bound service owns APDU channels. This non-exported provider accepts only this app UID. */
+class GatewayProvider : ContentProvider() {
+    companion object {
+        private val SE = EuiccChannel.SecureElementId.DEFAULT
+    }
+    override fun onCreate() = true
+    private fun authenticate() {
+        if(Binder.getCallingUid() != android.os.Process.myUid())throw SecurityException("Internal provider only")
+    }
+    private fun error(code: String) = JSONArray().put(JSONObject().put("error", code))
+    private fun profile(p: LocalProfileInfo) = JSONObject().put("iccid",p.iccid)
+        .put("enabled",p.state == LocalProfileInfo.State.Enabled).put("provider",p.providerName).put("nickname",p.nickName)
+    @Synchronized override fun query(uri: Uri, projection: Array<out String>?, selection: String?, selectionArgs: Array<out String>?, sortOrder: String?): Cursor {
+        authenticate()
+        val identity = Binder.clearCallingIdentity()
+        try {
+            val rows = runBlocking(Dispatchers.IO) {
+                if(context!!.checkSelfPermission(Manifest.permission.READ_PHONE_STATE) != PackageManager.PERMISSION_GRANTED)
+                    return@runBlocking error("phone_permission_required")
+                if(uri.getQueryParameter("callbackUrl") != null) throw SecurityException("Callbacks disabled")
+                val action = uri.lastPathSegment
+                if(action !in setOf("cards","profiles","downloadProfile","enableProfile","setPreference"))
+                    throw SecurityException("Unsupported operation")
+                if(action == "setPreference") {
+                    require(uri.getQueryParameter("name") == "ignoreTlsCertificate" && uri.getQueryParameter("enabled") == "false")
+                }
+                val app = context!!.applicationContext as OpenEuiccApplication
+                // Enforce TLS and stop activation codes from appearing in verbose HTTP logs.
+                app.appContainer.preferenceRepository.ignoreTLSCertificateFlow.updatePreference(false)
+                app.appContainer.preferenceRepository.verboseLoggingFlow.updatePreference(false)
+                if(action == "setPreference") return@runBlocking JSONArray().put(JSONObject().put("success",true))
+                val ready = CompletableDeferred<EuiccChannelManagerService>()
+                val connection = object: ServiceConnection {
+                    override fun onServiceConnected(name: ComponentName, binder: IBinder) {
+                        ready.complete((binder as EuiccChannelManagerService.LocalBinder).service)
+                    }
+                    override fun onServiceDisconnected(name: ComponentName) { ready.cancel() }
+                    override fun onNullBinding(name: ComponentName) { ready.cancel() }
+                }
+                check(context!!.bindService(Intent(context,EuiccChannelManagerService::class.java),connection,Context.BIND_AUTO_CREATE))
+                val wake = (context!!.getSystemService(Context.POWER_SERVICE) as PowerManager)
+                    .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK,"smsbridge:adapter")
+                try {
+                    wake.acquire(600000L)
+                    val service = withTimeout(20000L) { ready.await() }
+                    withTimeout(10000L) { service.waitForForegroundTask() }
+                    handle(service, uri, action!!)
+                } finally {
+                    if(wake.isHeld)wake.release()
+                    context!!.unbindService(connection)
+                }
+            }
+            return MatrixCursor(arrayOf("rows")).apply { addRow(arrayOf(rows.toString())) }
+        } catch(e: SecurityException) { throw e }
+          catch(e: Exception) {
+            val code = when(e) {
+                is TimeoutCancellationException -> "adapter_busy_or_reconnecting"
+                is net.typeblog.lpac_jni.LocalProfileAssistant.ProfileDownloadException -> "profile_download_failed"
+                is EuiccChannelManager.EuiccChannelNotFoundException -> "card_access_denied"
+                else -> "adapter_operation_failed"
+            }
+            // No activation code, PIN or server response is returned to an error log.
+            return MatrixCursor(arrayOf("rows")).apply { addRow(arrayOf(error(code).toString())) }
+        } finally { Binder.restoreCallingIdentity(identity) }
+    }
+    private suspend fun handle(service: EuiccChannelManagerService, uri: Uri, action: String): JSONArray {
+        val manager = service.euiccChannelManager
+        if(action == "cards") {
+            val result = JSONArray()
+            for((slot,port) in manager.flowInternalEuiccPorts().toList()) {
+                // This integration manages one removable card with a single secure element.
+                if(manager.flowEuiccSecureElements(slot,port).toList().size != 1)continue
+                val eid = manager.withEuiccChannel(slot,port,SE) { it.lpa.eID }
+                result.put(JSONObject().put("slot",slot).put("port",port).put("eid",eid))
+            }
+            return result
+        }
+        val slot = requireNotNull(uri.getQueryParameter("slot")).toInt()
+        val port = uri.getQueryParameter("port")?.toInt() ?: 0
+        require(slot in 0..7 && port in 0..7)
+        if(action == "profiles")return JSONArray(manager.withEuiccChannel(slot,port,SE) { c -> c.lpa.profiles.map { profile(it) } })
+        if(action == "downloadProfile") {
+            val ac = LPAString.parse(requireNotNull(uri.getQueryParameter("activationCode")))
+            val pin = uri.getQueryParameter("confirmationCode")
+            require(!ac.confirmationCodeRequired || !pin.isNullOrBlank())
+            val before = manager.withEuiccChannel(slot,port,SE) { c -> c.lpa.profiles.map { it.iccid }.toSet() }
+            // Reuse the upstream task queue so local UI and Telegram cannot mutate the card concurrently.
+            service.launchProfileDownloadTask(slot,port,SE,ac.address,ac.matchingId,pin,null)
+                .waitDone()?.let { throw it }
+            val added = manager.withEuiccChannel(slot,port,SE) { c -> c.lpa.profiles.filter { it.iccid !in before } }
+            check(added.size == 1)
+            return JSONArray().put(profile(added.single()))
+        }
+        if(action == "enableProfile") {
+            val iccid = requireNotNull(uri.getQueryParameter("iccid"))
+            require(iccid.matches(Regex("[0-9]{10,24}")))
+            service.launchProfileSwitchTask(slot,port,SE,iccid,true,20000L)
+                .waitDone()?.let { throw it }
+            val active = manager.withEuiccChannel(slot,port,SE) { c -> c.lpa.profiles.any { it.iccid == iccid && it.state == LocalProfileInfo.State.Enabled } }
+            return JSONArray().put(JSONObject().put("success",active))
+        }
+        return error("unsupported_operation")
+    }
+    override fun getType(uri: Uri) = "application/json"
+    override fun insert(uri: Uri, values: ContentValues?): Uri? = throw UnsupportedOperationException()
+    override fun delete(uri: Uri, selection: String?, selectionArgs: Array<out String>?) = throw UnsupportedOperationException()
+    override fun update(uri: Uri, values: ContentValues?, selection: String?, selectionArgs: Array<out String>?) = throw UnsupportedOperationException()
+}
