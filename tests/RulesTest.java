@@ -32,8 +32,8 @@ public final class RulesTest {
         List<String> chunks=Rules.chunks(text);check(String.join("",chunks).equals(text),"Long SMS reassembly");
         for(String part:chunks){check(part.length()<=3700,"Telegram chunk limit");check(!Character.isHighSurrogate(part.charAt(part.length()-1)),"No split emoji");}
         check(Rules.chunks("").size()==1,"Empty chunk");
-        check(Rules.retryMillis(0,0)==15000,"Initial retry");check(Rules.retryMillis(30,0)==900000,"Backoff cap");
-        check(Rules.retryMillis(0,42)==42000,"Honor Telegram retry_after");check(Rules.retryMillis(0,Long.MAX_VALUE)==86400000,"Overflow safe retry");
+        check(Rules.retryMillis(0,0)==2000,"Initial retry");check(Rules.retryMillis(30,0)==15000,"Backoff cap");
+        check(Rules.retryMillis(0,42)==42000,"Honor Telegram retry_after");check(Rules.retryMillis(0,Long.MAX_VALUE)==(Long.MAX_VALUE/2000L)*1000L,"Overflow safe retry");
         check(Rules.hash("one").equals(Rules.hash("one")),"Stable dedup");check(!Rules.hash("one").equals(Rules.hash("two")),"Different SMS IDs");
         check(Rules.service("UnlistedSender").equals("UnlistedSender"),"Unknown service stays original");
         check(Rules.service("12345").equals("12345"),"No guessed numerical service");

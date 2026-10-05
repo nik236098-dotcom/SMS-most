@@ -14,6 +14,7 @@ import android.content.IntentFilter;
 import android.content.pm.ServiceInfo;
 import android.net.ConnectivityManager;
 import android.net.NetworkCapabilities;
+import android.net.Network;
 import android.os.BatteryManager;
 import android.os.Build;
 import android.os.IBinder;
@@ -23,6 +24,7 @@ import java.util.concurrent.TimeUnit;
 
 public final class RelayService extends Service {
     private ScheduledExecutorService send,bot; private volatile boolean stopped;
+    private ConnectivityManager.NetworkCallback networkCallback;private volatile boolean networkReady;
     static void schedule(Context c) {
         JobScheduler jobs=c.getSystemService(JobScheduler.class);
         // Do not reset the retry interval on every SMS or foreground-service restart.
@@ -51,11 +53,32 @@ public final class RelayService extends Service {
             s.put("service_start_error","Не удалось запустить постоянный сервис ("+e.getClass().getSimpleName()+")");stopSelf();return;
         }
         send=Executors.newSingleThreadScheduledExecutor();bot=Executors.newSingleThreadScheduledExecutor();
-        send.scheduleWithFixedDelay(()->{try{if(!s.running()){stopSelf();return;}s.put("service_last_work",""+System.currentTimeMillis());deviceStatus();Outbox.drain(this);getSystemService(NotificationManager.class).notify(7702,notification());}catch(Exception e){s.put("error",Telegram.safe(e));}},0,5,TimeUnit.SECONDS);
+        send.scheduleWithFixedDelay(this::deliver,0,1,TimeUnit.SECONDS);
+        try {
+            networkCallback=new ConnectivityManager.NetworkCallback() {
+                @Override public void onCapabilitiesChanged(Network network,NetworkCapabilities capabilities) {
+                    boolean ready=capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED);
+                    if(ready&&!networkReady){s.retry();requestDelivery();}networkReady=ready;
+                }
+                @Override public void onLost(Network network){networkReady=false;}
+            };
+            getSystemService(ConnectivityManager.class).registerDefaultNetworkCallback(networkCallback);
+        }catch(RuntimeException e){networkCallback=null;}
         bot.execute(()->{Bot worker=new Bot(this);while(!stopped && s.running()) {
             try {worker.reconcile();}catch(Exception e){if(!s.get("adapter_slot","-1").equals("-1"))s.clearActive();}
             try {worker.poll(10);}catch(Exception e){s.put("bot_error",Telegram.safe(e));try{TimeUnit.SECONDS.sleep(e instanceof Telegram.ApiError?Math.min(60,Math.max(10,((Telegram.ApiError)e).retry)):10);}catch(InterruptedException stop){Thread.currentThread().interrupt();return;}}
         }});
+    }
+    private void requestDelivery() {
+        if(send!=null&&!stopped)try{send.execute(this::deliver);}catch(java.util.concurrent.RejectedExecutionException ignored){}
+    }
+    void deliver() {
+        Store s=BridgeApp.store();if(!s.running()){stopSelf();return;}
+        try {s.put("service_last_work",""+System.currentTimeMillis());Outbox.drain(this);}
+        catch(Exception e){s.put("error",Telegram.safe(e));}
+        // Optional status/notification refresh must not prevent delivery.
+        try {deviceStatus();getSystemService(NotificationManager.class).notify(7702,notification());}
+        catch(RuntimeException ignored){}
     }
     private Notification notification() {
         PendingIntent open=PendingIntent.getActivity(this,0,new Intent(this,MainActivity.class),PendingIntent.FLAG_IMMUTABLE|PendingIntent.FLAG_UPDATE_CURRENT);
@@ -74,8 +97,8 @@ public final class RelayService extends Service {
     }
     @Override public int onStartCommand(Intent i,int flags,int id) {
         if(i!=null&&"STOP".equals(i.getAction())){BridgeApp.store().put("enabled","false");BridgeApp.store().put("bot_enabled","false");BridgeApp.store().resetCalls();stopSelf();return START_NOT_STICKY;}
-        if(!BridgeApp.store().running()){stopSelf();return START_NOT_STICKY;}return START_STICKY;
+        if(!BridgeApp.store().running()){stopSelf();return START_NOT_STICKY;}requestDelivery();return START_STICKY;
     }
     @Override public IBinder onBind(Intent i){return null;}
-    @Override public void onDestroy(){stopped=true;if(send!=null)send.shutdownNow();if(bot!=null)bot.shutdownNow();super.onDestroy();}
+    @Override public void onDestroy(){stopped=true;if(networkCallback!=null)try{getSystemService(ConnectivityManager.class).unregisterNetworkCallback(networkCallback);}catch(RuntimeException ignored){}if(send!=null)send.shutdownNow();if(bot!=null)bot.shutdownNow();super.onDestroy();}
 }

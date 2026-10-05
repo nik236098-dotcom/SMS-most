@@ -51,8 +51,8 @@ public final class Rules {
         return out;
     }
     public static long retryMillis(int attempts, long seconds) {
-        if (seconds > 0) return Math.max(1000L, Math.min(seconds, 86400L) * 1000L);
-        return Math.min(900000L, 15000L * (1L << Math.min(Math.max(attempts, 0), 6)));
+        if (seconds > 0) return Math.min(seconds, Long.MAX_VALUE / 2000L) * 1000L;
+        return Math.min(15000L, 2000L * (1L << Math.min(Math.max(attempts, 0), 3)));
     }
     public static String hash(String text) {
         try {

@@ -35,6 +35,7 @@ final class Bot {
     }
     void poll(Telegram t,int timeout) throws Exception {
         if(!s.running())return;
+        long wait=s.telegramRemaining();if(wait>0){java.util.concurrent.TimeUnit.MILLISECONDS.sleep(Math.min(1000,wait));return;}
         if(!POLLING.compareAndSet(false,true)){java.util.concurrent.TimeUnit.MILLISECONDS.sleep(300);return;}
         String session=s.epoch();
         try {
@@ -49,10 +50,12 @@ final class Bot {
                 s.put("offset",""+(id+1));
                 if(!s.beginOperation(id))continue;
                 try {handle(t,u);} catch(Exception e) {s.put("error",Telegram.safe(e));
+                    if(e instanceof Telegram.ApiError && ((Telegram.ApiError)e).code==429){s.telegramWait(Math.max(1,((Telegram.ApiError)e).retry));break;}
                     if(s.chat()>0)try {t.send(replyTo(),Telegram.safe(e),null);} catch(Exception ignored) {}}
                 finally {s.endOperation(id);}
             }
-        } finally {POLLING.set(false);}
+        } catch(Telegram.ApiError e) {if(e.code==429)s.telegramWait(Math.max(1,e.retry));throw e;}
+        finally {POLLING.set(false);}
     }
     private void handle(Telegram t,JSONObject u) throws Exception {
         JSONObject cb=u.optJSONObject("callback_query");JSONObject m=cb==null?u.optJSONObject("message"):cb.optJSONObject("message");
@@ -84,6 +87,8 @@ final class Bot {
             if(data.equals("menu")){ menu(t,m);return; }
             if(data.equals("status")){ show(t,m,status(),keyboard(button("Назад","menu")));return; }
             if(data.equals("last")){ recent(t,m);return; }
+            if(data.equals("queue")){queue(t,m,false);return;}
+            if(data.equals("retry")){queue(t,m,true);return;}
             if(data.equals("calls")){recentCalls(t,m);return;}
             if(data.equals("test")){t.send(replyTo(),"✅ Бот отвечает. Телефон: "+s.get("device_status","")+"\nПересылка SMS: "+(s.enabled()?"включена":"выключена — проверь разрешение SMS на Android"),null);return;}
             if(data.equals("profiles")){ profiles(t,m);return; }
@@ -102,6 +107,8 @@ final class Bot {
         if(text.equals("/start")||text.equals("/menu")){s.put(draftKey(),"{}");menu(t,null);return;}
         if(text.equals("/cancel")){s.put(draftKey(),"{}");menu(t,null);return;}
         if(text.equals("/status")){t.send(replyTo(),status(),null);return;}
+        if(text.equals("/queue")){queue(t,null,false);return;}
+        if(text.equals("/retry")){queue(t,null,true);return;}
         if(text.equals("/calls")){recentCalls(t,null);return;}
         if(text.equals("/profiles")){profiles(t,null);return;}
         if(text.equals("/esim")||text.equals("/9esim")){s.put(draftKey(),"{}");adapterProfiles(t,null);return;}
@@ -348,13 +355,27 @@ final class Bot {
         p.put("reply_markup",keyboard==null?new JSONObject().put("inline_keyboard",new JSONArray()):keyboard);
         try {t.call("editMessageText",p);}catch(Telegram.ApiError e){if(e.code!=400)throw e;}
     }
-    private void menu(Telegram t,JSONObject m) throws Exception {show(t,m,"SMS Мост\n"+status(),keyboard(button("Проверить связь","test"),button("Статус телефона","status"),button("Последние SMS","last"),button("Входящие звонки","calls"),button("Мои SIM-карты","profiles"),button("Профили 9eSIM","adapter")));}
+    private void menu(Telegram t,JSONObject m) throws Exception {show(t,m,"SMS Мост\n"+status(),keyboard(button("Проверить связь","test"),button("Статус телефона","status"),button("Последние SMS","last"),button("Очередь отправки","queue"),button("Входящие звонки","calls"),button("Мои SIM-карты","profiles"),button("Профили 9eSIM","adapter")));}
+    private void queue(Telegram t,JSONObject m,boolean retry) throws Exception {
+        long target=replyTo();if(retry)s.retry(target);
+        StringBuilder text=new StringBuilder(retry?"Повторная отправка запрошена\n":"Очередь отправки\n");
+        text.append("Ожидают отправки тебе: ").append(s.pending(target)).append("\n");
+        JSONArray rows=s.queued(target);long now=System.currentTimeMillis();
+        for(int i=0;i<rows.length();i++) {
+            JSONObject p=rows.getJSONObject(i);String error=p.optString("error");long next=p.optLong("next_try");
+            text.append("\n#").append(p.optLong("id")).append(" · ").append(p.optString("recipient"))
+                .append("\n").append(p.optString("kind").equals("call")?"Входящий звонок":Rules.service(p.optString("sender")))
+                .append("\n").append(error.isEmpty()?"Ожидает отправки":error)
+                .append("\n").append(next>now?"Следующая попытка: "+SmsDiagnostics.time(""+next):"Готово к отправке").append("\n");
+        }
+        show(t,m,text.toString(),keyboard(button("Повторить отправку","retry"),button("Обновить","queue"),button("Назад","menu")));
+    }
     private String status() {String error=s.get("esim_last_error","");return "Телефон на связи\n"+SmsDiagnostics.report(s)+"\n\n"+CallDiagnostics.report(s)+"\nОтправлено сегодня: "+s.today()+"\nВ очереди: "+s.pending()+"\n"+s.get("device_status","")+(error.isEmpty()?"":"\n\nПоследняя ошибка загрузки eSIM:\n"+error);}
     private void recent(Telegram t,JSONObject m) throws Exception {
         StringBuilder b=new StringBuilder("Последние SMS\n");JSONArray rows=s.recent(replyTo(),"sms");
         for(int i=0;i<rows.length();i++){JSONObject p=rows.getJSONObject(i);b.append("\n#").append(p.getLong("id")).append(" · ").append(p.optString("recipient")).append("\n")
             .append(Rules.service(p.optString("sender"))).append(" · ").append(p.optString("state").equals("sent")?"Доставлено":"В очереди").append("\n");}
-        show(t,m,b.toString(),keyboard(button("Назад","menu")));
+        show(t,m,b.toString(),keyboard(button("Очередь и причины задержки","queue"),button("Повторить отправку","retry"),button("Назад","menu")));
     }
     private void recentCalls(Telegram t,JSONObject m) throws Exception {
         StringBuilder text=new StringBuilder("Входящие звонки\n\n").append(CallDiagnostics.report(s));JSONArray rows=s.recent(replyTo(),"call");

@@ -9,10 +9,28 @@ import javax.net.ssl.HttpsURLConnection;
 
 final class Telegram {
     static final class ApiError extends Exception {
-        final int code; final long retry;
+        final int code; final long retry; final boolean formatting;
         ApiError(int code, long retry) {
-            super(code==401?"Неверный токен бота":code==403?"Бот заблокирован получателем":code==409?"Бот используется другим приложением или webhook":code==429?"Telegram ограничил частоту отправки":code==400?"Telegram отклонил запрос": "Сеть или Telegram временно недоступны");
-            this.code=code; this.retry=retry;
+            this(code,retry,"");
+        }
+        ApiError(int code,long retry,String description) {
+            super(message(code,description));
+            this.code=code;this.retry=retry;this.formatting=code==400 && isFormatting(description);
+        }
+        private static boolean isFormatting(String text) {
+            String d=text.toLowerCase(java.util.Locale.ROOT);
+            return d.contains("can't parse entities") || d.contains("cannot parse entities") || d.contains("entity bounds") || d.contains("entity beginning") || d.contains("entity end");
+        }
+        private static String message(int code,String description) {
+            String d=description.toLowerCase(java.util.Locale.ROOT);
+            if(code==400) {
+                if(isFormatting(d))return "Telegram отклонил оформление сообщения (400)";
+                if(d.contains("chat not found"))return "Telegram не нашёл чат получателя (400): получатель должен нажать «Начать» у бота";
+                if(d.contains("message is too long"))return "Telegram отклонил длину сообщения (400)";
+                if(d.contains("message text is empty"))return "Telegram получил пустой текст сообщения (400)";
+                return "Telegram отклонил запрос (400)";
+            }
+            return code==401?"Неверный токен бота (401)":code==403?"Получатель недоступен для бота (403): проверь блокировку бота и нажми «Начать»":code==409?"Бот используется другим приложением или webhook":code==429?"Telegram ограничил частоту отправки": "Сеть или Telegram временно недоступны ("+code+")";
         }
     }
     private final String token;
@@ -33,7 +51,7 @@ final class Telegram {
             JSONObject obj=new JSONObject(new String(read(in,3*1024*1024),StandardCharsets.UTF_8));
             if (!obj.optBoolean("ok")) {
                 JSONObject parameters=obj.optJSONObject("parameters");
-                throw new ApiError(obj.optInt("error_code",status),parameters==null?0:parameters.optLong("retry_after"));
+                throw new ApiError(obj.optInt("error_code",status),parameters==null?0:parameters.optLong("retry_after"),obj.optString("description"));
             } return obj;
         } finally { c.disconnect(); }
     }

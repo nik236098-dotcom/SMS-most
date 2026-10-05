@@ -11,21 +11,32 @@ import java.util.UUID;
 
 final class Store extends SQLiteOpenHelper {
     private final Context context;
-    Store(Context c) { super(c, "bridge.db", null, 2); context=c.getApplicationContext(); }
+    Store(Context c) { super(c, "bridge.db", null, 3); context=c.getApplicationContext(); }
     @Override public void onCreate(SQLiteDatabase db) {
         db.execSQL("CREATE TABLE settings (k TEXT PRIMARY KEY, v TEXT NOT NULL)");
         db.execSQL("CREATE TABLE outbox (id INTEGER PRIMARY KEY AUTOINCREMENT, fingerprint TEXT UNIQUE, payload TEXT NOT NULL, created INTEGER NOT NULL, state TEXT NOT NULL DEFAULT 'pending', part INTEGER NOT NULL DEFAULT 0, attempts INTEGER NOT NULL DEFAULT 0, next_try INTEGER NOT NULL DEFAULT 0, error TEXT NOT NULL DEFAULT '', delivered INTEGER NOT NULL DEFAULT 0, route TEXT NOT NULL DEFAULT '')");
         db.execSQL("CREATE TABLE numbers (profile TEXT PRIMARY KEY, number TEXT NOT NULL)");
         db.execSQL("CREATE TABLE active (slot INTEGER PRIMARY KEY, profile TEXT NOT NULL, observed INTEGER NOT NULL)");
         db.execSQL("CREATE TABLE operations (id INTEGER PRIMARY KEY, state TEXT NOT NULL, updated INTEGER NOT NULL)");
+        createDeliveryWait(db);
+    }
+    private static void createDeliveryWait(SQLiteDatabase db) {
+        db.execSQL("CREATE TABLE delivery_wait (route TEXT PRIMARY KEY, until_time INTEGER NOT NULL, reason TEXT NOT NULL)");
     }
     @Override public void onUpgrade(SQLiteDatabase db, int oldVersion, int newVersion) {
-        if(oldVersion==1 && newVersion==2) {db.execSQL("ALTER TABLE outbox ADD COLUMN route TEXT NOT NULL DEFAULT ''");
+        if(oldVersion==1) {db.execSQL("ALTER TABLE outbox ADD COLUMN route TEXT NOT NULL DEFAULT ''");
             String previousEpoch="",previousChat="0";
             try(Cursor c=db.rawQuery("SELECT k,v FROM settings WHERE k IN ('epoch','chat')",null)){
                 while(c.moveToNext())try{if(c.getString(0).equals("epoch"))previousEpoch=Crypto.open(c.getString(1));else previousChat=Crypto.open(c.getString(1));}catch(Exception e){throw new IllegalStateException("Не удалось обновить очередь",e);}
             }
-            ContentValues cv=new ContentValues();cv.put("route",previousChat.equals("0")?"unclaimed":Rules.hash(previousEpoch+"|"+previousChat));db.update("outbox",cv,null,null);return;}
+            ContentValues cv=new ContentValues();cv.put("route",previousChat.equals("0")?"unclaimed":Rules.hash(previousEpoch+"|"+previousChat));db.update("outbox",cv,null,null);oldVersion=2;}
+        if(oldVersion==2 && newVersion==3) {
+            createDeliveryWait(db);
+            // Preserve any known Telegram flood deadline while releasing old day-long local waits.
+            db.execSQL("INSERT INTO delivery_wait(route,until_time,reason) SELECT '*',MAX(next_try),'telegram' FROM outbox WHERE state='pending' AND error='Telegram ограничил частоту отправки' HAVING MAX(next_try)>0");
+            db.execSQL("UPDATE outbox SET next_try=0 WHERE state='pending'");
+            return;
+        }
         throw new IllegalStateException("Unsupported database version");
     }
     synchronized String get(String k, String fallback) {
@@ -72,6 +83,7 @@ final class Store extends SQLiteOpenHelper {
         if (!get("token", "").equals(token) || !chats().equals(checked)) {
             if (running() || enabled()) throw new IllegalStateException("Сначала останови бота");
             if (pending() > 0) throw new IllegalStateException("Сначала отправь или удали очередь прежнего бота");
+            if(!get("token", "").equals(token))db.delete("delivery_wait",null,null);
             put("chat", ""+recipient);put("chat_ids",Rules.joinIds(checked)); put("chat_name", Rules.joinIds(checked)); put("offset", "0");
             put("epoch", UUID.randomUUID().toString()); put("draft", "{}");
             put("setup_code", ""); getWritableDatabase().delete("operations", null, null);
@@ -159,7 +171,8 @@ final class Store extends SQLiteOpenHelper {
         } db.setTransactionSuccessful();return first;}finally{db.endTransaction();}
     }
     synchronized JSONObject next() throws Exception {
-        try (Cursor c = getReadableDatabase().rawQuery("SELECT id,payload,part,attempts,next_try FROM outbox r WHERE state='pending' AND next_try<=? AND id=(SELECT MIN(id) FROM outbox q WHERE q.state='pending' AND q.route=r.route) ORDER BY id LIMIT 1", new String[]{""+System.currentTimeMillis()})) {
+        long now=System.currentTimeMillis();
+        try (Cursor c = getReadableDatabase().rawQuery("SELECT id,payload,part,attempts,next_try FROM outbox r WHERE state='pending' AND next_try<=? AND NOT EXISTS (SELECT 1 FROM delivery_wait w WHERE (w.route=r.route OR w.route='*') AND w.until_time>?) ORDER BY id LIMIT 1", new String[]{""+now,""+now})) {
             if (!c.moveToFirst() || c.getLong(4) > System.currentTimeMillis()) return null;
             return new JSONObject(Crypto.open(c.getString(1))).put("id", c.getLong(0)).put("part", c.getInt(2)).put("attempts", c.getInt(3));
         }
@@ -186,6 +199,30 @@ final class Store extends SQLiteOpenHelper {
     synchronized int pending() {
         try (Cursor c = getReadableDatabase().rawQuery("SELECT COUNT(*) FROM outbox WHERE state='pending'", null)) { c.moveToFirst(); return c.getInt(0); }
     }
+    synchronized int pending(long target) {
+        try(Cursor c=getReadableDatabase().rawQuery("SELECT COUNT(*) FROM outbox WHERE state='pending' AND route=?",new String[]{route(target)})) {c.moveToFirst();return c.getInt(0);}
+    }
+    synchronized JSONArray queued(long target) throws Exception {
+        JSONArray out=new JSONArray();long wait=deliveryWait(target);
+        try(Cursor c=getReadableDatabase().rawQuery("SELECT id,payload,error,next_try FROM outbox WHERE state='pending' AND route=? ORDER BY id LIMIT 10",new String[]{route(target)})) {
+            while(c.moveToNext())out.put(new JSONObject(Crypto.open(c.getString(1))).put("id",c.getLong(0)).put("error",c.getString(2)).put("next_try",Math.max(wait,c.getLong(3))));
+        }return out;
+    }
+    synchronized long deliveryWait(long target) {
+        try(Cursor c=getReadableDatabase().rawQuery("SELECT MAX(until_time) FROM delivery_wait WHERE route=? OR route='*'",new String[]{route(target)})) {return c.moveToFirst()?c.getLong(0):0;}
+    }
+    private void defer(String key,long millis,String reason) {
+        long until=System.currentTimeMillis()+Math.min(millis,Long.MAX_VALUE/2);
+        try(Cursor c=getReadableDatabase().rawQuery("SELECT until_time FROM delivery_wait WHERE route=?",new String[]{key})) {if(c.moveToFirst()&&c.getLong(0)>=until)return;}
+        ContentValues cv=new ContentValues();cv.put("route",key);cv.put("until_time",until);cv.put("reason",reason);
+        getWritableDatabase().insertWithOnConflict("delivery_wait",null,cv,SQLiteDatabase.CONFLICT_REPLACE);
+    }
+    synchronized void pace(long target) {defer(route(target),1000,"pace");}
+    synchronized void recipientUnavailable(long target) {defer(route(target),15000,"recipient");}
+    synchronized void telegramWait(long seconds) {defer("*",Rules.retryMillis(0,Math.max(1,seconds)),"telegram");}
+    synchronized long telegramRemaining() {
+        try(Cursor c=getReadableDatabase().rawQuery("SELECT until_time FROM delivery_wait WHERE route='*'",null)) {return c.moveToFirst()?Math.max(0,c.getLong(0)-System.currentTimeMillis()):0;}
+    }
     synchronized int today() {
         java.util.Calendar cal=java.util.Calendar.getInstance(); cal.set(java.util.Calendar.HOUR_OF_DAY,0); cal.set(java.util.Calendar.MINUTE,0); cal.set(java.util.Calendar.SECOND,0); cal.set(java.util.Calendar.MILLISECOND,0);
         try (Cursor c=getReadableDatabase().rawQuery("SELECT COUNT(*) FROM outbox WHERE state='sent' AND delivered>=?",new String[]{""+cal.getTimeInMillis()})) { c.moveToFirst();return c.getInt(0); }
@@ -207,6 +244,12 @@ final class Store extends SQLiteOpenHelper {
         } return out;
     }
     synchronized void retry() { getWritableDatabase().execSQL("UPDATE outbox SET next_try=0 WHERE state='pending'"); }
+    synchronized void retry(long target) {
+        ContentValues cv=new ContentValues();cv.put("next_try",0);
+        getWritableDatabase().update("outbox",cv,"state='pending' AND route=?",new String[]{route(target)});
+        getWritableDatabase().delete("delivery_wait","route=? AND reason='recipient'",new String[]{route(target)});
+        // A manual retry must never shorten Telegram's explicit retry_after or send pacing.
+    }
     synchronized void purgeQueue() { getWritableDatabase().delete("outbox", "state='pending'", null); }
     synchronized boolean beginOperation(long id) {
         ContentValues cv = new ContentValues(); cv.put("id", id); cv.put("state", "started"); cv.put("updated",System.currentTimeMillis());

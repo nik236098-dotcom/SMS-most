@@ -85,6 +85,38 @@ public class BotSetupTest {
     @Test public void stoppedBotDoesNotPoll() throws Exception {
         when(s.running()).thenReturn(false);bot.poll(api,0);verifyNoInteractions(api);
     }
+    @Test public void queueShowsOwnDeliveryFailureAndRetryButton() throws Exception {
+        owner=456;when(s.pending(456)).thenReturn(1);
+        when(s.queued(456)).thenReturn(new JSONArray().put(new JSONObject().put("id",43).put("recipient","my number")
+            .put("sender","Carrier").put("error","Telegram отклонил запрос (400)").put("next_try",0)));
+        updates(message("/queue",456,"private"));bot.poll(api,0);
+        verify(api).send(eq(456L),argThat(text->text.contains("#43")&&text.contains("400")&&text.contains("Готово к отправке")),
+            argThat(keys->keys.toString().contains("Повторить отправку")));
+        verify(s,never()).queued(789);
+    }
+    @Test public void retryCommandOnlyResumesCallingRecipientQueue() throws Exception {
+        owner=789;when(s.chats()).thenReturn(java.util.Arrays.asList(789L,456L));when(s.queued(456)).thenReturn(new JSONArray());
+        updates(message("/retry",456,"private"));bot.poll(api,0);
+        verify(s).retry(456);verify(s,never()).retry(789);verify(s,never()).retry();
+        verify(api).send(eq(456L),contains("Повторная отправка запрошена"),notNull());
+    }
+    @Test public void retryButtonWorksWithoutAndroidInteraction() throws Exception {
+        owner=456;when(s.queued(456)).thenReturn(new JSONArray());updates(callback("retry"));bot.poll(api,0);
+        verify(s).retry(456);verify(api).call(eq("editMessageText"),argThat(p->p.optString("text").contains("Повторная отправка запрошена")));
+    }
+    @Test public void unauthorizedRetryCannotChangeQueue() throws Exception {
+        owner=789;updates(message("/retry",456,"private"));bot.poll(api,0);
+        verify(s,never()).retry(anyLong());verify(s,never()).retry();verify(s,never()).queued(anyLong());
+    }
+    @Test public void telegram429FromCommandSetsSharedCooldownWithoutSendingErrorAgain() throws Exception {
+        owner=456;updates(message("/status",456,"private"));
+        doThrow(new Telegram.ApiError(429,42)).when(api).send(anyLong(),anyString(),any());bot.poll(api,0);
+        verify(s).telegramWait(42);verify(api,times(1)).send(anyLong(),anyString(),any());
+    }
+    @Test public void telegram429FromPollingSetsSharedCooldown() throws Exception {
+        when(api.call(eq("getUpdates"),any())).thenThrow(new Telegram.ApiError(429,42));
+        assertThrows(Telegram.ApiError.class,()->bot.poll(api,0));verify(s).telegramWait(42);
+    }
     @Test public void networkErrorExplainsTelegramEndpoint() {
         assertTrue(Telegram.safe(new java.net.SocketTimeoutException()).contains("api.telegram.org"));
         assertTrue(Telegram.safe(new java.net.UnknownHostException()).contains("DNS"));

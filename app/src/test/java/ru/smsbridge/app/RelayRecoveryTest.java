@@ -49,4 +49,12 @@ public class RelayRecoveryTest {
             app.when(BridgeApp::store).thenReturn(s);RelayService.start(c);verifyNoInteractions(c);
         }
     }
+    @Test public void unavailableDeviceStatusDoesNotPreventOutboxDelivery() {
+        Store s=mock(Store.class);when(s.running()).thenReturn(true);
+        RelayService service=mock(RelayService.class);doCallRealMethod().when(service).deliver();
+        try(MockedStatic<BridgeApp> app=mockStatic(BridgeApp.class);MockedStatic<Outbox> outbox=mockStatic(Outbox.class)) {
+            app.when(BridgeApp::store).thenReturn(s);service.deliver();
+            outbox.verify(()->Outbox.drain(service));
+        }
+    }
 }
