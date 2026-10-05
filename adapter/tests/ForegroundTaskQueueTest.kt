@@ -12,6 +12,12 @@ import java.io.IOException
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class ForegroundTaskQueueTest {
+    private fun assertError(expected: Throwable, actual: Throwable?) {
+        // Coroutine stack-trace recovery may copy an exception across a suspension point.
+        assertNotNull(actual)
+        assertEquals(expected.javaClass, actual!!.javaClass)
+        assertEquals(expected.message, actual.message)
+    }
     private class Fixture(val test: TestScope, val owner: CoroutineScope = test) {
         val queue = ForegroundTaskQueue(owner, StandardTestDispatcher(test.testScheduler), StandardTestDispatcher(test.testScheduler), 30_000)
         var ran = 0
@@ -38,7 +44,7 @@ class ForegroundTaskQueueTest {
     @Test fun rejectedStartProducesFailureAndAllowsNextOperation() = runTest {
         val f = Fixture(this);val cause = IllegalStateException("foreground start rejected")
         val task = f.launch(start = { throw cause });runCurrent()
-        val failure = task.waitDone();assertTrue(failure is ForegroundTaskStartException);assertSame(cause,failure!!.cause)
+        val failure = task.waitDone();assertTrue(failure is ForegroundTaskStartException);assertError(cause,failure!!.cause)
         assertEquals(0,f.ran);assertEquals(1,f.cleaned);f.nextSucceeds()
     }
     @Test fun missingStartCallbackTimesOutAndDoesNotLeakWaitingSubscriber() = runTest {
@@ -57,22 +63,22 @@ class ForegroundTaskQueueTest {
     @Test fun notificationOrWakeLockSetupFailureCompletesBeforeAnyCardWrite() = runTest {
         val f = Fixture(this);val cause = SecurityException("notification denied")
         val task = f.launch(prepare = { throw cause });runCurrent()
-        assertSame(cause,task.waitDone()!!.cause);assertEquals(0,f.ran);assertEquals(1,f.cleaned);f.nextSucceeds()
+        assertError(cause,task.waitDone()!!.cause);assertEquals(0,f.ran);assertEquals(1,f.cleaned);f.nextSucceeds()
     }
     @Test fun networkFailureRunsCleanupAndNextTaskCanSucceed() = runTest {
         val f = Fixture(this);val cause = IOException("connection interrupted")
         val task = f.launch(work = { throw cause });runCurrent()
-        assertSame(cause,task.waitDone());assertEquals(1,f.cleaned);f.nextSucceeds()
+        assertError(cause,task.waitDone());assertEquals(1,f.cleaned);f.nextSucceeds()
     }
     @Test fun cleanupFailureCannotLoseTerminalResult() = runTest {
         val f = Fixture(this);val cause = IllegalStateException("release failed")
         val task = f.launch(cleanup = { throw cause });runCurrent()
-        assertSame(cause,task.waitDone());f.nextSucceeds()
+        assertError(cause,task.waitDone());f.nextSucceeds()
     }
     @Test fun originalFailureSurvivesCleanupFailure() = runTest {
         val f = Fixture(this);val cause = IOException("network interrupted")
         val task = f.launch(work = { throw cause },cleanup = { throw IllegalStateException("release failed") });runCurrent()
-        assertSame(cause,task.waitDone());f.nextSucceeds()
+        assertError(cause,task.waitDone());f.nextSucceeds()
     }
     @Test fun progressNotificationFailureCannotKillCompletionStream() = runTest {
         val f = Fixture(this);var updates = 0
@@ -84,7 +90,7 @@ class ForegroundTaskQueueTest {
     @Test fun failureNotificationFailureStillReleasesQueue() = runTest {
         val f = Fixture(this);val cause = IOException("failed")
         val task = f.launch(work = { throw cause },failure = { throw IllegalStateException("notify failed") });runCurrent()
-        assertSame(cause,task.waitDone());f.nextSucceeds()
+        assertError(cause,task.waitDone());f.nextSucceeds()
     }
     @Test fun cancellationWhileWaitingToStartCompletesTheTask() = runTest {
         val owner = CoroutineScope(SupervisorJob()+StandardTestDispatcher(testScheduler));val f = Fixture(this,owner)
@@ -105,7 +111,7 @@ class ForegroundTaskQueueTest {
     }
     @Test fun recoveredSubscriberKeepsItsOwnOutcomeAcrossLaterTasks() = runTest {
         val f = Fixture(this);val cause = IOException("first failed");val first = f.launch(work = { throw cause });runCurrent()
-        f.nextSucceeds();assertSame(cause,f.queue.recover(first.taskId)!!.waitDone());assertSame(cause,first.waitDone())
+        f.nextSucceeds();assertError(cause,f.queue.recover(first.taskId)!!.waitDone());assertError(cause,first.waitDone())
     }
     @Test fun taskIdsAreUniqueEvenWithinOneClockTickAndCacheIsBounded() = runTest {
         val f = Fixture(this);val ids = mutableListOf<Long>()
