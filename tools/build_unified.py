@@ -2,6 +2,7 @@
 """Build one APK from pinned OpenEUICC source and our SMS relay, without injecting binaries."""
 import pathlib,subprocess,shutil,xml.etree.ElementTree as ET,tarfile,re,json
 from patch_profile_delete import patch_service,patch_profile_read
+from patch_task_recovery import patch_task_recovery
 base=pathlib.Path(__file__).resolve().parents[1]
 vendor=base/'vendor'/'openeuicc'
 ref='f17e1713722b89da0234954d9beb81ec77c5005e'
@@ -13,7 +14,7 @@ run(['git','submodule','update','--init','--recursive'],vendor)
 settings=vendor/'settings.gradle.kts';s=settings.read_text();s=re.sub(r'buildscript \{.*?\n\}\n','',s,flags=re.S);settings.write_text(s)
 p=vendor/'app-deps/build.gradle.kts';s=p.read_text();s=re.sub(r'import org.lineageos[^\n]*\n','',s);s=re.sub(r'apply \{\s*plugin<GenerateBpPlugin>\(\)\s*\}\s*','',s);s=s[:s.find('configure<GenerateBpPluginExtension>')] if 'configure<GenerateBpPluginExtension>' in s else s;p.write_text(s)
 # Ensure Java 17 relay sources and Kotlin use the same target in the application module.
-p=vendor/'app-unpriv/build.gradle.kts';s=p.read_text().replace('applicationId = "im.angry.easyeuicc"','applicationId = "ru.smsbridge.app"\n        versionCode = 10\n        versionName = "0.10.0"\n        buildConfigField("String", "LPA_SIGNER_SHA256", "\\\"\\\"")')
+p=vendor/'app-unpriv/build.gradle.kts';s=p.read_text().replace('applicationId = "im.angry.easyeuicc"','applicationId = "ru.smsbridge.app"\n        versionCode = 11\n        versionName = "0.11.0"\n        buildConfigField("String", "LPA_SIGNER_SHA256", "\\\"\\\"")')
 s=s.replace('android {','android {\n    buildFeatures { buildConfig = true }',1)
 s=s.replace('plugin<MyVersioningPlugin>()','').replace('JavaVersion.VERSION_1_8','JavaVersion.VERSION_17').replace('jvmTarget = "1.8"','jvmTarget = "17"')
 s=s.replace('versionNameSuffix = "-unpriv"','versionNameSuffix = ""')
@@ -32,6 +33,11 @@ for p in (base/'app/src/main/java/ru/smsbridge/app').glob('*.java'):
  (java/p.name).write_text(s)
 gateway=vendor/'app-unpriv/src/main/java/ru/smsbridge/adapter';gateway.mkdir(parents=True,exist_ok=True)
 shutil.copy2(base/'adapter/GatewayProvider.kt',gateway/'GatewayProvider.kt')
+common_service=vendor/'app-common/src/main/java/im/angry/openeuicc/service'
+shutil.copy2(base/'adapter/ForegroundTaskQueue.kt',common_service/'ForegroundTaskQueue.kt')
+common_tests=vendor/'app-common/src/test/java/im/angry/openeuicc/service';common_tests.mkdir(parents=True,exist_ok=True)
+shutil.copy2(base/'adapter/tests/ForegroundTaskQueueTest.kt',common_tests/'ForegroundTaskQueueTest.kt')
+p=vendor/'app-common/build.gradle.kts';s=p.read_text().replace('    testImplementation("junit:junit:4.13.2")','    testImplementation("junit:junit:4.13.2")\n    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.7.3")');p.write_text(s)
 shutil.copytree(base/'app/src/main/res',vendor/'app-unpriv/src/main/res',dirs_exist_ok=True)
 shutil.copytree(base/'app/src/test',vendor/'app-unpriv/src/test',dirs_exist_ok=True)
 # Complete two upstream translations so lint checks stay enabled for this build.
@@ -62,10 +68,10 @@ xml.write(p,encoding='utf-8',xml_declaration=True)
 # Avoid indefinite HTTP operations while holding a SIM APDU channel.
 p=vendor/'libs/lpac-jni/src/main/java/net/typeblog/lpac_jni/impl/HttpInterfaceImpl.kt';s=p.read_text().replace('conn.connectTimeout = 2000','conn.connectTimeout = 15000\n            conn.readTimeout = 45000');p.write_text(s)
 # Test and build the exact unified Java + Kotlin sources, native lpac included.
-p=vendor/'app-common/src/main/java/im/angry/openeuicc/service/EuiccChannelManagerService.kt';p.write_text(patch_service(p.read_text()))
+p=vendor/'app-common/src/main/java/im/angry/openeuicc/service/EuiccChannelManagerService.kt';p.write_text(patch_task_recovery(patch_service(p.read_text())))
 p=vendor/'libs/lpac-jni/src/main/jni/lpac-jni/lpac-jni.c';p.write_text(patch_profile_read(p.read_text()))
 run(['python3',base/'tools/test_native_profile_read.py',p])
-run(['bash','gradlew',':app-unpriv:assembleRelease',':app-unpriv:testReleaseUnitTest',':app-unpriv:lintRelease','--no-daemon'],vendor)
+run(['bash','gradlew',':app-unpriv:assembleRelease',':app-unpriv:testReleaseUnitTest',':app-common:testReleaseUnitTest',':app-unpriv:lintRelease','--no-daemon'],vendor)
 dist=base/'dist';dist.mkdir(exist_ok=True)
 output=vendor/'app-unpriv/build/outputs/apk/release'
 apks=list(output.glob('*.apk'));assert len(apks)==1,apks

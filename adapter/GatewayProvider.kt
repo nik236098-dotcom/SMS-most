@@ -79,6 +79,7 @@ class GatewayProvider : ContentProvider() {
         } catch(e: SecurityException) { throw e }
           catch(e: Exception) {
             val code = when(e) {
+                is im.angry.openeuicc.service.ForegroundTaskStartException -> "adapter_start_failed"
                 is TimeoutCancellationException -> "adapter_busy_or_reconnecting"
                 is net.typeblog.lpac_jni.LocalProfileAssistant.ProfileDownloadException -> "profile_download_failed"
                 is EuiccChannelManager.EuiccChannelNotFoundException -> "card_access_denied"

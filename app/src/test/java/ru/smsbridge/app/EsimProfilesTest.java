@@ -267,4 +267,23 @@ public class EsimProfilesTest {
         command("/add");command("+79991234567");command("LPA:1$example.com$sample-token");tap(confirmation());command("/status");
         assertEquals(error,settings.get("esim_last_error"));verify(api).send(eq(CHAT),argThat(t->t.contains("Последняя ошибка загрузки")&&t.contains("8.1 / 4.8")),isNull());
     }
+    @Test public void failedDownloadDoesNotPermanentlyBlockFollowingInstall() throws Exception {
+        when(adapter.download(eq("LPA:1$example.com$first"),anyString())).thenThrow(new UserError("Соединение прервалось"));
+        command("/add");command("+79991111111");command("LPA:1$example.com$first");String failed=confirmation();tap(failed);
+        assertEquals("true",settings.get("switching"));bot.reconcile();assertEquals("false",settings.get("switching"));
+        // The service can recover and process a new command; the first QR is never replayed.
+        when(adapter.download(eq("LPA:1$example.com$second"),anyString())).thenAnswer(i->{add(3,false);return new JSONObject().put("iccid",iccid(3)).put("eid",EID);});
+        command("/add");command("+79992222222");command("LPA:1$example.com$second");tap(confirmation());tap(failed);
+        verify(adapter,times(1)).download("LPA:1$example.com$first","");verify(adapter,times(1)).download("LPA:1$example.com$second","");
+        verify(adapter).enable(iccid(3));assertEquals("false",settings.get("switching"));assertEquals("",settings.get("esim_last_error"));
+        verify(api).send(eq(CHAT),contains("Активирован профиль +79992222222"),notNull());
+    }
+    @Test public void installedProfileAfterLostResponseIsNotDownloadedAgainAutomatically() throws Exception {
+        when(adapter.download(anyString(),anyString())).thenAnswer(i->{add(3,false);throw new UserError("Ответ после установки потерялся");});
+        command("/add");command("+79993333333");command("LPA:1$example.com$uncertain");String confirm=confirmation();tap(confirm);
+        bot.reconcile();command("/esim");tap(confirm);
+        assertEquals(3,profiles.length());verify(adapter,times(1)).download("LPA:1$example.com$uncertain","");
+        verify(adapter,never()).enable(anyString());verify(store,never()).number(anyString(),anyString());
+        verify(api).send(eq(CHAT),contains("Всего: 3"),notNull());
+    }
 }

@@ -7,6 +7,7 @@ on:
       - 'adapter/**'
       - 'tools/build_unified.py'
       - 'tools/patch_profile_delete.py'
+      - 'tools/patch_task_recovery.py'
       - 'tools/test_native_profile_read.py'
       - '.github/workflows/unified.yml'
   workflow_dispatch:
@@ -49,4 +50,6 @@ jobs:
           path: |
             vendor/openeuicc/app-unpriv/build/reports/
             vendor/openeuicc/app-unpriv/build/test-results/
+            vendor/openeuicc/app-common/build/reports/tests/
+            vendor/openeuicc/app-common/build/test-results/
           if-no-files-found: ignore
