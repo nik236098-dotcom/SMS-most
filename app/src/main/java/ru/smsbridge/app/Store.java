@@ -199,7 +199,7 @@ final class Store extends SQLiteOpenHelper {
     synchronized int pending() {
         try (Cursor c = getReadableDatabase().rawQuery("SELECT COUNT(*) FROM outbox WHERE state='pending'", null)) { c.moveToFirst(); return c.getInt(0); }
     }
-    synchronized int pending(long target) {
+    synchronized int pendingFor(long target) {
         try(Cursor c=getReadableDatabase().rawQuery("SELECT COUNT(*) FROM outbox WHERE state='pending' AND route=?",new String[]{route(target)})) {c.moveToFirst();return c.getInt(0);}
     }
     synchronized JSONArray queued(long target) throws Exception {

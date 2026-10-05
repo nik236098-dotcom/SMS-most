@@ -359,7 +359,7 @@ final class Bot {
     private void queue(Telegram t,JSONObject m,boolean retry) throws Exception {
         long target=replyTo();if(retry)s.retry(target);
         StringBuilder text=new StringBuilder(retry?"Повторная отправка запрошена\n":"Очередь отправки\n");
-        text.append("Ожидают отправки тебе: ").append(s.pending(target)).append("\n");
+        text.append("Ожидают отправки тебе: ").append(s.pendingFor(target)).append("\n");
         JSONArray rows=s.queued(target);long now=System.currentTimeMillis();
         for(int i=0;i<rows.length();i++) {
             JSONObject p=rows.getJSONObject(i);String error=p.optString("error");long next=p.optLong("next_try");

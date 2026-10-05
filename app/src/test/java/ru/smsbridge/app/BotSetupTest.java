@@ -86,7 +86,7 @@ public class BotSetupTest {
         when(s.running()).thenReturn(false);bot.poll(api,0);verifyNoInteractions(api);
     }
     @Test public void queueShowsOwnDeliveryFailureAndRetryButton() throws Exception {
-        owner=456;when(s.pending(456)).thenReturn(1);
+        owner=456;when(s.pendingFor(456)).thenReturn(1);
         when(s.queued(456)).thenReturn(new JSONArray().put(new JSONObject().put("id",43).put("recipient","my number")
             .put("sender","Carrier").put("error","Telegram отклонил запрос (400)").put("next_try",0)));
         updates(message("/queue",456,"private"));bot.poll(api,0);
