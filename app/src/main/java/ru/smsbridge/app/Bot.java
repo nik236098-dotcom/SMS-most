@@ -353,15 +353,16 @@ final class Bot {
     private void confirm(Telegram t,JSONObject m,String nonce) throws Exception {
         JSONObject d=draft();if(!d.optString("nonce").equals(nonce))throw new UserError("Подтверждение устарело. Начни операцию заново.");
         if(!s.get("esim_control","false").equals("true"))throw new UserError("Управление адаптером выключено на телефоне");
-        show(t,m,"Проверяем выбранный профиль на адаптере… Статус операции доступен через /status.",null);
-        JSONObject card=lpa.card();if(!card.getString("eid").equals(d.optString("eid")))throw new UserError("Адаптер изменился. Начни операцию заново.");
-        String stage=d.optString("stage");if(stage.equals("confirm_delete")){confirmDelete(t,m,d,card);return;}
-        if(!stage.equals("confirm_add")&&!stage.equals("confirm_enable"))return;
+        String stage=d.optString("stage");
+        if(!stage.equals("confirm_add")&&!stage.equals("confirm_enable")&&!stage.equals("confirm_delete"))return;
         if(stage.equals("confirm_add")) {
             String[] activation=d.getString("code").split("\\$",-1);
             if(activation.length>4 && activation[4].equals("1") && d.optString("pin").isEmpty())
                 throw new UserError("Оператор требует код подтверждения. Пришли /pin КОД, затем снова нажми «Установить eSIM».");
         }
+        show(t,m,"Проверяем выбранный профиль на адаптере… Статус операции доступен через /status.",null);
+        JSONObject card=lpa.card();if(!card.getString("eid").equals(d.optString("eid")))throw new UserError("Адаптер изменился. Начни операцию заново.");
+        if(stage.equals("confirm_delete")){confirmDelete(t,m,d,card);return;}
         if(stage.equals("confirm_enable")) {
             JSONObject p=findProfile(card,d.getString("iccid"));
             if(p.optBoolean("enabled")) {

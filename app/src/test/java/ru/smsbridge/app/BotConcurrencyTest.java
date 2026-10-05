@@ -62,6 +62,13 @@ public class BotConcurrencyTest {
         deleting();send("","confirm:nonce",456);verify(api).send(eq(456L),contains("Новый запрос не запущен"),isNull());
         complete();verify(lpa,times(1)).delete(EID,ICCID,false);
     }
+    @Test public void smsDeliveryContinuesWhileNativeDeletionWaits() throws Exception {
+        deleting();android.content.Context c=mock(android.content.Context.class);android.os.PowerManager power=mock(android.os.PowerManager.class);
+        android.os.PowerManager.WakeLock lock=mock(android.os.PowerManager.WakeLock.class);when(c.getSystemService(android.os.PowerManager.class)).thenReturn(power);
+        when(power.newWakeLock(anyInt(),anyString())).thenReturn(lock);when(s.pending(77)).thenReturn(true);
+        when(s.next()).thenReturn(new JSONObject().put("id",77).put("part",0).put("chat_id",456).put("epoch","session").put("sender","Carrier").put("body","SMS still arrives").put("received",1),null);
+        Outbox.drain(c,s,api);verify(api).call(eq("sendMessage"),argThat(p->p.optString("text").contains("SMS still arrives")));verify(s).delivered(77);assertTrue(tasks.busy());complete();
+    }
     @Test public void slowOperationWarnsWithoutClaimingFailureOrReleasingGate() throws Exception {
         deleting();alarms.get(0).run();assertTrue(tasks.busy());
         verify(s).enqueueNotice(anyString(),eq(456L),contains("Результат ещё не подтверждён"));verify(s,never()).forgetNumber(anyString());
