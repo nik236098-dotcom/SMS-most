@@ -7,6 +7,12 @@ import java.util.List;
 import static org.junit.Assert.*;
 
 public class SmsTextTest {
+    @Test public void adapterNoticeIsDeliveredAsPlainResultWithoutSmsOrOtpFormatting() throws Exception {
+        String text="Профиль удалён. ICCID: 8900000000000000001";
+        JSONObject p=SmsText.messages(new JSONObject().put("kind","notice").put("body",text),456).get(0);
+        assertEquals(text,p.getString("text"));assertEquals(456,p.getLong("chat_id"));
+        assertFalse(p.has("entities"));assertFalse(p.getBoolean("protect_content"));
+    }
     private JSONObject sms(String body) throws Exception {
         return new JSONObject().put("id",123456).put("sender","12345").put("recipient","+79991234567")
             .put("body",body).put("received",1780000000000L);

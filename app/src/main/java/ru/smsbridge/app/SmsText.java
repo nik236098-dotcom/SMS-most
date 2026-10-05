@@ -11,6 +11,11 @@ import java.util.regex.Pattern;
 final class SmsText {
     private static final Pattern CODE=Pattern.compile("(?<![\\p{L}\\p{N}+])(?<![0-9][./-])[0-9]{4,8}(?![\\p{L}\\p{N}]|[./-][0-9])");
     static List<JSONObject> messages(JSONObject sms,long chat) throws Exception {
+        if(sms.optString("kind").equals("notice")) {
+            List<JSONObject> notices=new ArrayList<>();
+            for(String part:Rules.chunks(sms.optString("body")))notices.add(new JSONObject().put("chat_id",chat).put("text",part).put("protect_content",false));
+            return notices;
+        }
         String body=sms.optString("body"),text=Bot.format(sms);int bodyStart=Bot.header(sms).length();
         List<int[]> codes=new ArrayList<>();Matcher matcher=CODE.matcher(body);
         if(!sms.optString("kind").equals("call"))while(matcher.find())codes.add(new int[]{bodyStart+matcher.start(),bodyStart+matcher.end()});

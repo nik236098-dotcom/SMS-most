@@ -83,6 +83,7 @@ final class Store extends SQLiteOpenHelper {
         java.util.List<Long> checked=Rules.telegramIds(Rules.joinIds(recipients));
         long recipient=checked.isEmpty()?0:checked.get(0);
         if (!get("token", "").equals(token) || !chats().equals(checked)) {
+            if(AdapterTasks.shared().busy())throw new IllegalStateException("Дождись завершения операции 9eSIM перед изменением получателей или бота");
             if (running() || enabled()) throw new IllegalStateException("Сначала останови бота");
             if (pending() > 0) throw new IllegalStateException("Сначала отправь или удали очередь прежнего бота");
             if(!get("token", "").equals(token))db.delete("delivery_wait",null,null);
@@ -178,6 +179,13 @@ final class Store extends SQLiteOpenHelper {
             if (!c.moveToFirst() || c.getLong(4) > System.currentTimeMillis()) return null;
             return new JSONObject(Crypto.open(c.getString(1))).put("id", c.getLong(0)).put("part", c.getInt(2)).put("attempts", c.getInt(3));
         }
+    }
+    synchronized void enqueueNotice(String fingerprint,long target,String text) throws Exception {
+        if(!chats().contains(target))return;
+        JSONObject p=new JSONObject().put("kind","notice").put("body",text).put("epoch",epoch()).put("chat_id",target).put("received",System.currentTimeMillis());
+        ContentValues cv=new ContentValues();cv.put("fingerprint",fingerprint+"|"+target);cv.put("payload",Crypto.seal(p.toString()));
+        cv.put("created",System.currentTimeMillis());cv.put("route",route(target));
+        getWritableDatabase().insertWithOnConflict("outbox",null,cv,SQLiteDatabase.CONFLICT_IGNORE);
     }
     synchronized void progress(long id, int nextPart) {
         ContentValues cv = new ContentValues(); cv.put("part", nextPart); cv.put("attempts", 0); cv.put("next_try", 0);

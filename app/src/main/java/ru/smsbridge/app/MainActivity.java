@@ -102,7 +102,7 @@ public final class MainActivity extends Activity {
         setupLabel.setVisibility(running&&s.chat()==0?View.VISIBLE:View.GONE);
         long seen=Long.parseLong(s.get("bot_last_seen","0"));String api=seen==0?"Ожидается первый ответ Telegram":System.currentTimeMillis()-seen<60000?"Telegram отвечает ✓":"Давно нет ответа Telegram";
         stats.setText(api+"\nSMS: "+(s.enabled()?(s.chat()>0?"пересылка включена":"ожидают подключения получателя"):"нужно разрешение SMS или запуск бота")+"\nДоставок сегодня: "+s.today()+" · очередь: "+s.pending());
-        smsDiagnostics.setText(SmsDiagnostics.report(s)+"\n\n"+CallDiagnostics.report(s));
+        smsDiagnostics.setText(SmsDiagnostics.report(s)+"\n\n"+CallDiagnostics.report(s)+"\n\n"+Bot.adapterStatus(s));
         error.setText(s.get("bot_error","")+ (s.get("bot_error","").isEmpty()?"":"\n")+s.get("error",""));
     }
     private void launch() {
@@ -139,7 +139,8 @@ public final class MainActivity extends Activity {
         try {JSONArray rows=s.recent();if(rows.length()==0)label(root,"Сообщений пока нет",17,false);
             for(int i=0;i<rows.length();i++){JSONObject p=rows.getJSONObject(i);LinearLayout c=card();label(c,p.optString("recipient"),19,true);
                 label(c,"Доставка в Telegram ID: "+p.optLong("chat_id",s.chat()),14,false);
-                if(p.optString("kind").equals("call")){label(c,"📞 Входящий звонок",16,true);label(c,"Абонент: "+p.optString("sender"),16,false);}
+                if(p.optString("kind").equals("notice")){label(c,"Результат операции 9eSIM",16,true);label(c,p.optString("body"),15,false);}
+                else if(p.optString("kind").equals("call")){label(c,"📞 Входящий звонок",16,true);label(c,"Абонент: "+p.optString("sender"),16,false);}
                 else {label(c,"Сервис: "+Rules.service(p.optString("sender")),16,true);label(c,"Отправитель: "+p.optString("sender"),14,false);label(c,p.optString("body"),15,false);}
                 label(c,SmsDiagnostics.time(p.optString("received","0")),14,false);label(c,p.optString("state").equals("sent")?"✓ Доставлено":"В очереди · "+p.optString("error"),14,false);
             }}catch(Exception e){toast("Не удалось прочитать историю");}

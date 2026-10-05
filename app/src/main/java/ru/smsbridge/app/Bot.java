@@ -16,14 +16,15 @@ import java.util.UUID;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 final class Bot {
-    private final Store s; private final LpaClient lpa; private final NativeSims sims; private long currentChat;
+    private final Store s; private final LpaClient lpa; private final NativeSims sims; private final AdapterTasks tasks; private long currentChat;
     private long replyTo(){return currentChat>0?currentChat:s.chat();}
     private String draftKey(){return "draft:"+replyTo();}
     private String menuKey(){return "profile_menu:"+replyTo();}
     private static final AtomicBoolean POLLING=new AtomicBoolean(false);
-    Bot(Context c) {s=BridgeApp.store();lpa=new LpaClient(c);sims=NativeSims.on(c);}
+    Bot(Context c) {this(BridgeApp.store(),new LpaClient(c),NativeSims.on(c),AdapterTasks.shared());}
     Bot(Store store,LpaClient adapter) {this(store,adapter,()->new JSONArray());}
-    Bot(Store store,LpaClient adapter,NativeSims subscriptions) {s=store;lpa=adapter;sims=subscriptions;}
+    Bot(Store store,LpaClient adapter,NativeSims subscriptions) {this(store,adapter,subscriptions,null);}
+    Bot(Store store,LpaClient adapter,NativeSims subscriptions,AdapterTasks taskRunner) {s=store;lpa=adapter;sims=subscriptions;tasks=taskRunner;}
     private final java.util.Map<Long,Long> prompts=new java.util.LinkedHashMap<>();
     static JSONObject button(String text,String data) throws Exception {return new JSONObject().put("text",text).put("callback_data",data);}
     static JSONObject keyboard(JSONObject... buttons) throws Exception {
@@ -49,13 +50,60 @@ final class Bot {
                 // Commit consumption before side effects. A crash must not replay a one-use download.
                 s.put("offset",""+(id+1));
                 if(!s.beginOperation(id))continue;
-                try {handle(t,u);} catch(Exception e) {s.put("error",Telegram.safe(e));
+                boolean deferred=false;
+                try {deferred=dispatch(t,u,id);} catch(Exception e) {s.put("error",Telegram.safe(e));
                     if(e instanceof Telegram.ApiError && ((Telegram.ApiError)e).code==429){s.telegramWait(Math.max(1,((Telegram.ApiError)e).retry));break;}
                     if(s.chat()>0)try {t.send(replyTo(),Telegram.safe(e),null);} catch(Exception ignored) {}}
-                finally {s.endOperation(id);}
+                finally {if(!deferred)s.endOperation(id);}
             }
         } catch(Telegram.ApiError e) {if(e.code==429)s.telegramWait(Math.max(1,e.retry));throw e;}
         finally {POLLING.set(false);}
+    }
+    private boolean dispatch(Telegram t,JSONObject u,long operation) throws Exception {
+        if(tasks==null){handle(t,u);return false;}
+        JSONObject cb=u.optJSONObject("callback_query"),m=cb==null?u.optJSONObject("message"):cb.optJSONObject("message");
+        JSONObject from=cb==null?(m==null?null:m.optJSONObject("from")):cb.optJSONObject("from");
+        if(m==null||from==null||s.chat()==0){handle(t,u);return false;}
+        JSONObject chat=m.getJSONObject("chat");long target=chat.optLong("id");
+        if(!Rules.authorized(s.chats(),target,chat.optString("type"),from.optBoolean("is_bot"))||from.optLong("id")!=target)return false;
+        currentChat=target;
+        Bot handler=new Bot(s,lpa,sims);handler.currentChat=target;
+        String command=cb==null?m.optString("text","").trim():cb.optString("data");
+        boolean menu=cb==null&&(command.equals("/start")||command.equals("/menu"));
+        if(menu&&tasks.busy()){handler.menu(t,null);return false;}
+        boolean immediate=cb==null?java.util.Arrays.asList("/start","/menu","/status","/queue","/retry","/calls","/profiles").contains(command):
+            java.util.Arrays.asList("menu","status","last","queue","retry","calls","test","profiles").contains(command);
+        if(immediate){handler.handle(t,u);return false;}
+        String session=s.epoch();
+        if(cb!=null)try{t.call("answerCallbackQuery",new JSONObject().put("callback_query_id",cb.getString("id")));}catch(Exception ignored){}
+        boolean submitted=tasks.submit(()->{
+            s.put("esim_task_started",""+System.currentTimeMillis());s.put("esim_task_state","running");
+            s.put("esim_task_label",command.startsWith("confirm:")?"Подтверждённая операция с профилем":"Запрос к 9eSIM");
+        },()->{
+            try {if(s.running()&&session.equals(s.epoch())&&s.chats().contains(target))handler.handle(t,u);}
+            catch(Exception e){
+                s.put("error",Telegram.safe(e));
+                if(e instanceof Telegram.ApiError&&((Telegram.ApiError)e).code==429)s.telegramWait(Math.max(1,((Telegram.ApiError)e).retry));
+                if(s.running()&&session.equals(s.epoch())&&s.chats().contains(target))try{
+                    String message="Операция 9eSIM не завершена с подтверждением: "+Telegram.safe(e)+"\nЕсли менял профиль, проверь /esim перед повтором.";
+                    s.put("esim_last_result",message);s.enqueueNotice("adapter-error:"+session+":"+operation,target,message);
+                }catch(Exception ignored){}
+            } finally {s.endOperation(operation);}
+        },()->{
+            if(s.running()&&session.equals(s.epoch())&&s.chats().contains(target))try{
+                s.enqueueNotice("adapter-slow:"+session+":"+operation,target,
+                    "9eSIM пока не завершил операцию. Результат ещё не подтверждён. Повторно удаление или установку не запускай. Бот продолжает отвечать: /start и /status.");
+            }catch(Exception ignored){}
+        },()->s.put("esim_task_state","idle"));
+        if(!submitted)t.send(target,"9eSIM ещё занят предыдущей операцией. Новый запрос не запущен. Статус: /status. Меню и пересылка SMS продолжают работать.",null);
+        return submitted;
+    }
+    void reconcileAsync() {
+        if(tasks==null)throw new IllegalStateException("Adapter worker missing");
+        if(!s.running()||!s.get("esim_control","false").equals("true"))return;
+        tasks.submit(()->{s.put("esim_task_started",""+System.currentTimeMillis());s.put("esim_task_state","running");s.put("esim_task_label","Проверка активного профиля");},()->{
+            try {reconcile();}catch(Exception e){s.clearActive();s.put("esim_refresh_error",Telegram.safe(e));}
+        },()->s.put("esim_refresh_error","Адаптер долго не отвечает; Telegram продолжает работать"),()->s.put("esim_task_state","idle"));
     }
     private void handle(Telegram t,JSONObject u) throws Exception {
         JSONObject cb=u.optJSONObject("callback_query");JSONObject m=cb==null?u.optJSONObject("message"):cb.optJSONObject("message");
@@ -288,20 +336,24 @@ final class Bot {
         s.put(draftKey(),"{}");show(t,m,"Удаляем выбранный профиль… Дождись проверки адаптера.",null);
         s.put("switching","true");s.clearActive();boolean verified=false;
         try {
+            s.put("last_delete",new JSONObject(d.toString()).put("chat_id",replyTo()).toString());
             JSONObject result=lpa.delete(d.getString("eid"),d.getString("iccid"),d.optBoolean("allow_active"));
             // The provider verifies absence on the same EID. Only then discard this number binding.
             if(result==null||!result.optBoolean("success"))throw new UserError("Удаление не подтверждено. Обнови /esim.");
             s.forgetNumber(d.getString("key"));s.put(menuKey(),"{}");verified=true;
-            boolean refreshed=false;try {lpa.refresh(s);s.put("switching","false");refreshed=true;}catch(Exception ignored){}
             String message="✅ Профиль удалён с адаптера.\nICCID: "+d.getString("iccid")
                 +(result.optBoolean("notification_warning")?"\nУведомление серверу оператора не подтверждено. На карте профиль уже отсутствует.":"")
-                +(!refreshed?"\nНе удалось обновить активный профиль. Нажми «Обновить список».":"");
-            t.send(replyTo(),message,keyboard(button("Обновить список","adapter")));
+                +"\nАктивный профиль будет проверен отдельно. Список: /esim";
+            s.put("esim_last_result",message);
+            // Persist the verified result before another adapter read or network request can fail.
+            s.enqueueNotice("delete-result:"+s.epoch()+":"+d.getString("nonce"),replyTo(),message);
+            s.put("last_delete","{}");
         } finally {if(!verified)s.put("error","eSIM: удаление не подтверждено; проверь /esim");}
     }
     private void confirm(Telegram t,JSONObject m,String nonce) throws Exception {
         JSONObject d=draft();if(!d.optString("nonce").equals(nonce))throw new UserError("Подтверждение устарело. Начни операцию заново.");
         if(!s.get("esim_control","false").equals("true"))throw new UserError("Управление адаптером выключено на телефоне");
+        show(t,m,"Проверяем выбранный профиль на адаптере… Статус операции доступен через /status.",null);
         JSONObject card=lpa.card();if(!card.getString("eid").equals(d.optString("eid")))throw new UserError("Адаптер изменился. Начни операцию заново.");
         String stage=d.optString("stage");if(stage.equals("confirm_delete")){confirmDelete(t,m,d,card);return;}
         if(!stage.equals("confirm_add")&&!stage.equals("confirm_enable"))return;
@@ -330,7 +382,7 @@ final class Bot {
                 JSONObject p;
                 try {p=lpa.download(d.getString("code"),d.optString("pin"));s.put("esim_last_error","");}
                 catch(Exception e){s.put("esim_last_error",Telegram.safe(e));throw e;}
-                iccid=p.getString("iccid");
+                iccid=p.getString("iccid");s.put("esim_last_result","Профиль загружен на карту; проверяем активацию. ICCID: "+iccid);
                 String key=Rules.profileKey(p.getString("eid"),iccid);number=d.getString("number");s.number(key,number);
             } else number=s.number(d.getString("key"));
             lpa.enable(iccid);
@@ -339,7 +391,10 @@ final class Bot {
             if(!active)throw new UserError("Профиль сохранён, но активация не подтверждена. Проверь список eSIM.");
             s.put("switching","false");refreshed=true;
             if(stage.equals("confirm_add"))s.put("last_install","{}");
-            t.send(replyTo(),number.equals("Номер не задан")?"🟢 Активирован профиль с ICCID …"+iccid.substring(Math.max(0,iccid.length()-6))+".\nНомер пока не задан. Его можно указать в профиле.":"🟢 Активирован профиль "+number+".\nВ новых SMS будет указан этот номер.",keyboard(button("Профили 9eSIM","adapter")));
+            String result=number.equals("Номер не задан")?"🟢 Активирован профиль с ICCID …"+iccid.substring(Math.max(0,iccid.length()-6))+".\nНомер пока не задан. Его можно указать в профиле.":"🟢 Активирован профиль "+number+".\nВ новых SMS будет указан этот номер.";
+            s.put("esim_last_result",result);
+            try {t.send(replyTo(),result,keyboard(button("Профили 9eSIM","adapter")));}
+            catch(Exception e){s.enqueueNotice("activation-result:"+s.epoch()+":"+d.getString("nonce"),replyTo(),result);if(e instanceof Telegram.ApiError&&((Telegram.ApiError)e).code==429)s.telegramWait(Math.max(1,((Telegram.ApiError)e).retry));}
         } finally {
             if(!refreshed) {s.clearActive();s.put("error","eSIM: проверь состояние профилей после незавершённой операции");}
         }
@@ -347,7 +402,19 @@ final class Bot {
     void reconcile() throws Exception {
         if(!lpa.installed()||!s.get("esim_control","false").equals("true"))return;
         // Runs on the same thread as mutations, so it never clears 'switching' mid-download.
-        lpa.refresh(s);s.put("switching","false");
+        lpa.refresh(s);s.put("switching","false");s.put("esim_refresh_error","");recoverDeletion();
+    }
+    private void recoverDeletion() throws Exception {
+        JSONObject d=new JSONObject(s.get("last_delete","{}"));if(!d.has("iccid"))return;
+        if(!d.optString("epoch").equals(s.epoch()))return;
+        JSONObject card=lpa.card();if(!card.getString("eid").equals(d.getString("eid")))throw new UserError("Для проверки прерванного удаления нужен прежний адаптер");
+        JSONArray ps=lpa.profiles(card.getInt("slot"),card.optInt("port",0));boolean found=false;
+        for(int i=0;i<ps.length();i++)if(ps.getJSONObject(i).getString("iccid").equals(d.getString("iccid")))found=true;
+        String message=found?"После прерванной операции профиль всё ещё на карте. Удаление не подтверждено; автоматически не повторялось. Проверь /esim.":
+            "✅ Проверка после прерванной операции: профиль отсутствует на прежнем адаптере. ICCID: "+d.getString("iccid");
+        if(!found)s.forgetNumber(d.getString("key"));
+        s.put("esim_last_result",message);s.enqueueNotice("delete-result:"+s.epoch()+":"+d.getString("nonce"),d.getLong("chat_id"),message);
+        s.put("last_delete","{}");
     }
     private void show(Telegram t,JSONObject m,String text,JSONObject keyboard) throws Exception {
         if(m==null){t.send(replyTo(),text,keyboard);return;}
@@ -364,13 +431,20 @@ final class Bot {
         for(int i=0;i<rows.length();i++) {
             JSONObject p=rows.getJSONObject(i);String error=p.optString("error");long next=p.optLong("next_try");
             text.append("\n#").append(p.optLong("id")).append(" · ").append(p.optString("recipient"))
-                .append("\n").append(p.optString("kind").equals("call")?"Входящий звонок":Rules.service(p.optString("sender")))
+                .append("\n").append(p.optString("kind").equals("notice")?"Результат операции 9eSIM":p.optString("kind").equals("call")?"Входящий звонок":Rules.service(p.optString("sender")))
                 .append("\n").append(error.isEmpty()?"Ожидает отправки":error)
                 .append("\n").append(next>now?"Следующая попытка: "+SmsDiagnostics.time(""+next):"Готово к отправке").append("\n");
         }
         show(t,m,text.toString(),keyboard(button("Повторить отправку","retry"),button("Обновить","queue"),button("Назад","menu")));
     }
-    private String status() {String error=s.get("esim_last_error","");return "Телефон на связи\n"+SmsDiagnostics.report(s)+"\n\n"+CallDiagnostics.report(s)+"\nОтправлено сегодня: "+s.today()+"\nВ очереди: "+s.pending()+"\n"+s.get("device_status","")+(error.isEmpty()?"":"\n\nПоследняя ошибка загрузки eSIM:\n"+error);}
+    private String status() {String error=s.get("esim_last_error","");return "Телефон на связи\n"+SmsDiagnostics.report(s)+"\n\n"+CallDiagnostics.report(s)+"\nОтправлено сегодня: "+s.today()+"\nВ очереди: "+s.pending()+"\n"+s.get("device_status","")+"\n"+adapterStatus(s)+(error.isEmpty()?"":"\n\nПоследняя ошибка загрузки eSIM:\n"+error);}
+    static String adapterStatus(Store s) {
+        String state=s.get("esim_task_state","idle"),result=s.get("esim_last_result","");
+        String text="9eSIM: "+(state.equals("running")?s.get("esim_task_label","операция выполняется"):state.equals("interrupted")?"результат предыдущей операции неизвестен":"нет текущей операции");
+        if(state.equals("running"))try{text+=" · "+Math.max(0,(System.currentTimeMillis()-Long.parseLong(s.get("esim_task_started","0")))/1000)+" сек.";}catch(NumberFormatException ignored){}
+        String refresh=s.get("esim_refresh_error","");
+        return text+(refresh.isEmpty()?"":"\n"+refresh)+(result.isEmpty()?"":"\nПоследний результат:\n"+result);
+    }
     private void recent(Telegram t,JSONObject m) throws Exception {
         StringBuilder b=new StringBuilder("Последние SMS\n");JSONArray rows=s.recent(replyTo(),"sms");
         for(int i=0;i<rows.length();i++){JSONObject p=rows.getJSONObject(i);b.append("\n#").append(p.getLong("id")).append(" · ").append(p.optString("recipient")).append("\n")

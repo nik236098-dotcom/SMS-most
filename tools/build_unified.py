@@ -14,7 +14,7 @@ run(['git','submodule','update','--init','--recursive'],vendor)
 settings=vendor/'settings.gradle.kts';s=settings.read_text();s=re.sub(r'buildscript \{.*?\n\}\n','',s,flags=re.S);settings.write_text(s)
 p=vendor/'app-deps/build.gradle.kts';s=p.read_text();s=re.sub(r'import org.lineageos[^\n]*\n','',s);s=re.sub(r'apply \{\s*plugin<GenerateBpPlugin>\(\)\s*\}\s*','',s);s=s[:s.find('configure<GenerateBpPluginExtension>')] if 'configure<GenerateBpPluginExtension>' in s else s;p.write_text(s)
 # Ensure Java 17 relay sources and Kotlin use the same target in the application module.
-p=vendor/'app-unpriv/build.gradle.kts';s=p.read_text().replace('applicationId = "im.angry.easyeuicc"','applicationId = "ru.smsbridge.app"\n        versionCode = 13\n        versionName = "0.13.0"\n        buildConfigField("String", "LPA_SIGNER_SHA256", "\\\"\\\"")')
+p=vendor/'app-unpriv/build.gradle.kts';s=p.read_text().replace('applicationId = "im.angry.easyeuicc"','applicationId = "ru.smsbridge.app"\n        versionCode = 14\n        versionName = "0.14.0"\n        buildConfigField("String", "LPA_SIGNER_SHA256", "\\\"\\\"")')
 s=s.replace('android {','android {\n    buildFeatures { buildConfig = true }',1)
 s=s.replace('plugin<MyVersioningPlugin>()','').replace('JavaVersion.VERSION_1_8','JavaVersion.VERSION_17').replace('jvmTarget = "1.8"','jvmTarget = "17"')
 s=s.replace('versionNameSuffix = "-unpriv"','versionNameSuffix = ""')

@@ -23,7 +23,7 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 
 public final class RelayService extends Service {
-    private ScheduledExecutorService send,bot; private volatile boolean stopped;
+    private ScheduledExecutorService send,bot,adapter; private volatile boolean stopped;
     private ConnectivityManager.NetworkCallback networkCallback;private volatile boolean networkReady;
     static void schedule(Context c) {
         JobScheduler jobs=c.getSystemService(JobScheduler.class);
@@ -64,8 +64,9 @@ public final class RelayService extends Service {
             };
             getSystemService(ConnectivityManager.class).registerDefaultNetworkCallback(networkCallback);
         }catch(RuntimeException e){networkCallback=null;}
-        bot.execute(()->{Bot worker=new Bot(this);while(!stopped && s.running()) {
-            try {worker.reconcile();}catch(Exception e){if(!s.get("adapter_slot","-1").equals("-1"))s.clearActive();}
+        Bot worker=new Bot(this);adapter=Executors.newSingleThreadScheduledExecutor();
+        adapter.scheduleWithFixedDelay(()->{try{worker.reconcileAsync();}catch(Exception e){s.put("esim_refresh_error",Telegram.safe(e));}},0,10,TimeUnit.SECONDS);
+        bot.execute(()->{while(!stopped && s.running()) {
             try {worker.poll(10);}catch(Exception e){s.put("bot_error",Telegram.safe(e));try{TimeUnit.SECONDS.sleep(e instanceof Telegram.ApiError?Math.min(60,Math.max(10,((Telegram.ApiError)e).retry)):10);}catch(InterruptedException stop){Thread.currentThread().interrupt();return;}}
         }});
     }
@@ -100,5 +101,5 @@ public final class RelayService extends Service {
         if(!BridgeApp.store().running()){stopSelf();return START_NOT_STICKY;}requestDelivery();return START_STICKY;
     }
     @Override public IBinder onBind(Intent i){return null;}
-    @Override public void onDestroy(){stopped=true;if(networkCallback!=null)try{getSystemService(ConnectivityManager.class).unregisterNetworkCallback(networkCallback);}catch(RuntimeException ignored){}if(send!=null)send.shutdownNow();if(bot!=null)bot.shutdownNow();super.onDestroy();}
+    @Override public void onDestroy(){stopped=true;if(networkCallback!=null)try{getSystemService(ConnectivityManager.class).unregisterNetworkCallback(networkCallback);}catch(RuntimeException ignored){}if(send!=null)send.shutdownNow();if(bot!=null)bot.shutdownNow();if(adapter!=null)adapter.shutdownNow();super.onDestroy();}
 }

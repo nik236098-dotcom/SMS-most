@@ -200,7 +200,8 @@ public class EsimProfilesTest {
         profiles=new JSONArray().put(profiles.getJSONObject(1)).put(profiles.getJSONObject(0));tap(confirmation());
         verify(adapter).delete(EID,iccid(2),false);verify(store).forgetNumber(key2);verify(store,never()).forgetNumber(key1);
         assertEquals("+79991111111",numbers.get(key1));assertFalse(numbers.containsKey(key2));assertEquals(1,profiles.length());
-        assertEquals("false",settings.get("switching"));verify(api).send(eq(CHAT),contains("Профиль удалён"),notNull());
+        assertEquals("true",settings.get("switching"));verify(store).enqueueNotice(anyString(),eq(CHAT),contains("Профиль удалён"));
+        verify(adapter,never()).refresh(store);
     }
     @Test public void activeProfileConfirmationExplicitlyAuthorizesDisable() throws Exception {
         successfulDelete();chooseDelete(0);assertTrue(lastEdit().getString("text").contains("Этот профиль активен"));
@@ -245,9 +246,10 @@ public class EsimProfilesTest {
         when(adapter.delete(anyString(),anyString(),anyBoolean())).thenReturn(new JSONObject().put("success",false));
         chooseDelete(1);tap(confirmation());verify(store,never()).forgetNumber(anyString());verify(api,never()).send(anyLong(),contains("Профиль удалён"),any());
     }
-    @Test public void refreshFailureAfterVerifiedDeleteReportsDeletionWithWarning() throws Exception {
+    @Test public void verifiedDeletePersistsResultWithoutWaitingForAnotherAdapterRead() throws Exception {
         successfulDelete();doThrow(new UserError("No card")).when(adapter).refresh(store);chooseDelete(1);tap(confirmation());
-        verify(api).send(eq(CHAT),argThat(t->t.contains("Профиль удалён")&&t.contains("Не удалось обновить")),notNull());
+        verify(store).enqueueNotice(anyString(),eq(CHAT),argThat(t->t.contains("Профиль удалён")&&t.contains("проверен отдельно")));
+        verify(adapter,never()).refresh(store);assertTrue(settings.get("esim_last_result").contains("Профиль удалён"));
         verify(store).forgetNumber(Rules.profileKey(EID,iccid(2)));
     }
     @Test public void unauthorizedAccountCannotUseOwnersDeleteConfirmation() throws Exception {
