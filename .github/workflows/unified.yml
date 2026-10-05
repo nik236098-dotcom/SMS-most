@@ -9,6 +9,9 @@ on:
       - 'tools/patch_profile_delete.py'
       - 'tools/patch_task_recovery.py'
       - 'tools/test_native_profile_read.py'
+      - 'tools/test_legacy_sqlite.py'
+      - 'tools/legacy_sqlite.py'
+      - 'tools/test_queue.py'
       - '.github/workflows/unified.yml'
   workflow_dispatch:
 permissions:
@@ -31,6 +34,8 @@ jobs:
         run: sdkmanager 'platforms;android-34' 'platforms;android-35' 'build-tools;35.0.0' 'ndk;26.1.10909125'
       - name: Check relay core
         run: bash tools/test_core.sh
+      - name: Check upgrade with Android-compatible SQLite 3.22
+        run: python3 tools/test_legacy_sqlite.py
       - name: Build source-integrated LPA and run tests
         run: python3 tools/build_unified.py
       - uses: actions/upload-artifact@v4

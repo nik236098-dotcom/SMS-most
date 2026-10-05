@@ -1,6 +1,8 @@
 """Exercise production Store SQL with SQLite, including the v2 -> v3 queue upgrade."""
 from pathlib import Path
-import re, sqlite3
+import re, sqlite3, os, tempfile
+if os.environ.get('SMS_BRIDGE_SQLITE_LIBRARY'):
+    import legacy_sqlite as sqlite3
 source=(Path(__file__).resolve().parents[1]/'app/src/main/java/ru/smsbridge/app/Store.java').read_text()
 def sql(prefix):
     return next(x for x in re.findall(r'"([^"\n]+)"',source) if x.startswith(prefix))
@@ -47,4 +49,34 @@ check(next_id(7000) is None,'Upgrade must preserve known Telegram cooldown')
 check(next_id(8000)==a5,'After cooldown the previously stuck SMS must retry');sent(a5)
 check(next_id(8000)==a6,'429 message must also retry');sent(a6)
 check(next_id(9000) is None,'Delivered messages must never be resent')
+# Empty migration must create a harmless zero deadline, not fail or insert NULL.
+empty=sqlite3.connect(':memory:');empty.execute(schema);empty.execute(wait_schema)
+empty.execute(sql('INSERT INTO delivery_wait(route,until_time,reason) SELECT '))
+check(empty.execute("SELECT until_time FROM delivery_wait WHERE route='*'").fetchone()==(0,),'Empty migration must be valid on Android SQLite')
+empty.close()
+if os.environ.get('SMS_BRIDGE_SQLITE_LIBRARY'):
+    # SQLiteOpenHelper runs upgrade and user_version update in one transaction.
+    # Reproduce failure in 0.12, rollback, then recover without deleting saved data.
+    with tempfile.TemporaryDirectory() as folder:
+        path=str(Path(folder)/'upgrade.db');upgrade=sqlite3.connect(path)
+        upgrade.execute(schema);upgrade.execute('PRAGMA user_version=2')
+        upgrade.execute("INSERT INTO outbox(payload,created,route,next_try,part) VALUES('saved SMS',0,'A',86400000,1)")
+        upgrade.execute('BEGIN');upgrade.execute(wait_schema)
+        old="INSERT INTO delivery_wait(route,until_time,reason) SELECT '*',MAX(next_try),'telegram' FROM outbox WHERE state='pending' AND error='Telegram ограничил частоту отправки' HAVING MAX(next_try)>0"
+        try:upgrade.execute(old);raise AssertionError('Old migration unexpectedly succeeded')
+        except sqlite3.DatabaseError as error:
+            check('GROUP BY' in str(error),'Reproduce the actual old Android migration error')
+            print('Reproduced v0.12 failure:',error)
+        upgrade.execute('ROLLBACK')
+        check(upgrade.execute('PRAGMA user_version').fetchone()==(2,),'Failed upgrade must leave schema version 2')
+        check(upgrade.execute("SELECT name FROM sqlite_master WHERE name='delivery_wait'").fetchone() is None,'Failed upgrade must roll back new table')
+        upgrade.execute('BEGIN');upgrade.execute(wait_schema)
+        upgrade.execute(sql('INSERT INTO delivery_wait(route,until_time,reason) SELECT '))
+        upgrade.execute(sql("UPDATE outbox SET next_try=0 WHERE state='pending'"))
+        upgrade.execute('PRAGMA user_version=3');upgrade.execute('COMMIT');upgrade.close()
+        reopened=sqlite3.connect(path)
+        check(reopened.execute('PRAGMA user_version').fetchone()==(3,),'Corrected upgrade must persist schema version 3')
+        check(reopened.execute('SELECT payload,part,next_try FROM outbox').fetchone()==('saved SMS',1,0),'Recovery must preserve SMS and acknowledged parts after reopening')
+        check(reopened.execute(query,(1000,1000)).fetchone()[0]==1,'Recovered queue must be readable by sender')
+        reopened.close()
 print(f'Passed {count} SQLite delivery queue checks')

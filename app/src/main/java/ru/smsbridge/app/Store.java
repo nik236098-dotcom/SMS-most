@@ -33,7 +33,9 @@ final class Store extends SQLiteOpenHelper {
         if(oldVersion==2 && newVersion==3) {
             createDeliveryWait(db);
             // Preserve any known Telegram flood deadline while releasing old day-long local waits.
-            db.execSQL("INSERT INTO delivery_wait(route,until_time,reason) SELECT '*',MAX(next_try),'telegram' FROM outbox WHERE state='pending' AND error='Telegram ограничил частоту отправки' HAVING MAX(next_try)>0");
+            // HAVING without GROUP BY is rejected by SQLite < 3.39 (Android 9–13).
+            // Keep the aggregate row even for an empty queue; zero means no cooldown.
+            db.execSQL("INSERT INTO delivery_wait(route,until_time,reason) SELECT '*',COALESCE(MAX(next_try),0),'telegram' FROM outbox WHERE state='pending' AND error='Telegram ограничил частоту отправки'");
             db.execSQL("UPDATE outbox SET next_try=0 WHERE state='pending'");
             return;
         }

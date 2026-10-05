@@ -34,6 +34,8 @@ jobs:
         run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
       - name: Run core tests
         run: bash tools/test_core.sh
+      - name: Check upgrade with Android-compatible SQLite 3.22
+        run: python3 tools/test_legacy_sqlite.py
       - name: Prepare adapter signer (manufacturer public key)
         if: inputs.build_adapter
         run: python3 tools/prepare_signer.py
