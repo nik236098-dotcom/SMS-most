@@ -144,23 +144,58 @@ final class Store extends SQLiteOpenHelper {
         }
     }
     synchronized void clearActive() { getWritableDatabase().delete("active", null, null); }
+    synchronized void clearActive(int slot) {getWritableDatabase().delete("active","slot=?",new String[]{""+slot});}
+    synchronized boolean managed(int slot) {
+        if(!get("esim_control","false").equals("true")||slot<0)return false;
+        String cards=get("adapter_cards","");
+        if(cards.isEmpty())return get("adapter_slot","-1").equals(""+slot);
+        try{return new JSONObject(cards).has(""+slot);}catch(Exception e){return true;}
+    }
+    synchronized void rememberCards(JSONArray cards) throws Exception {
+        JSONObject before=new JSONObject(get("adapter_cards","{}")),after=new JSONObject();
+        for(int i=0;i<cards.length();i++) {
+            JSONObject card=cards.getJSONObject(i);String slot=""+card.getInt("slot");
+            String eid=card.optBoolean("unavailable")?before.optString(slot,"unknown"):card.getString("eid");
+            if(after.has(slot))throw new UserError("В одном слоте обнаружено несколько карт; проверь адаптеры");
+            after.put(slot,eid);if(!eid.equals(before.optString(slot)))clearActive(card.getInt("slot"));
+            if(card.optBoolean("unavailable"))clearActive(card.getInt("slot"));
+        }
+        java.util.Iterator<String> keys=before.keys();while(keys.hasNext()){String slot=keys.next();if(!after.has(slot))clearActive(Integer.parseInt(slot));}
+        put("adapter_cards",after.toString());
+    }
+    synchronized void switching(int slot,boolean value) {put("switching:"+slot,""+value);}
+    synchronized boolean switching(int slot) {return get("switching:"+slot,get("adapter_slot","-1").equals(""+slot)?get("switching","false"):"false").equals("true");}
+    synchronized JSONArray pendingDeletes() throws Exception {
+        JSONArray list=new JSONArray(get("pending_deletes","[]"));JSONObject legacy=new JSONObject(get("last_delete","{}"));
+        if(legacy.has("iccid")){boolean seen=false;for(int i=0;i<list.length();i++)if(list.getJSONObject(i).optString("nonce").equals(legacy.optString("nonce")))seen=true;
+            if(!seen)list.put(legacy);put("pending_deletes",list.toString());put("last_delete","{}");}
+        return list;
+    }
+    synchronized void rememberDelete(JSONObject intent) throws Exception {
+        JSONArray list=pendingDeletes();for(int i=0;i<list.length();i++)if(list.getJSONObject(i).getString("nonce").equals(intent.getString("nonce")))return;
+        list.put(intent);put("pending_deletes",list.toString());
+    }
+    synchronized void finishDelete(String nonce) throws Exception {
+        JSONArray list=pendingDeletes(),rest=new JSONArray();for(int i=0;i<list.length();i++)if(!list.getJSONObject(i).getString("nonce").equals(nonce))rest.put(list.getJSONObject(i));put("pending_deletes",rest.toString());
+    }
     synchronized void active(int slot, String profile) {
         ContentValues cv = new ContentValues(); cv.put("slot", slot); cv.put("profile", profile); cv.put("observed", System.currentTimeMillis());
         getWritableDatabase().insertWithOnConflict("active", null, cv, SQLiteDatabase.CONFLICT_REPLACE);
     }
     synchronized String recipient(int slot, int subId) throws Exception {
-        if (!get("esim_control", "false").equals("true") || !get("adapter_slot", "-1").equals(""+slot)) return number("physical:"+subId);
-        if (get("switching", "false").equals("true")) return "Номер не определён: переключение eSIM";
+        if (!managed(slot)) return number("physical:"+subId);
+        if (switching(slot)) return "Номер не определён: переключение eSIM";
         try (Cursor c = getReadableDatabase().rawQuery("SELECT profile,observed FROM active WHERE slot=?", new String[]{""+slot})) {
             if (c.moveToFirst()) {
                 // A stale adapter observation must never become a confidently labelled SMS.
                 if (System.currentTimeMillis() - c.getLong(1) > 25000) return "Номер не определён: профиль не проверен";
+                String eid=new JSONObject(get("adapter_cards","{}")).optString(""+slot,"");
+                if(!eid.isEmpty()&&!c.getString(0).startsWith(eid+":"))return "Номер не определён: адаптер изменился";
                 return number(c.getString(0));
             }
         }
         // Only an explicitly configured physical-SIM mapping may be used as fallback.
-        if (get("adapter_slot", "-1").equals(""+slot)) return "Номер не определён: нет связи с адаптером";
-        return number("physical:"+subId);
+        return "Номер не определён: нет связи с адаптером";
     }
     synchronized long enqueue(String fingerprint, JSONObject p) throws Exception {
         p.put("epoch", epoch());

@@ -45,41 +45,52 @@ final class LpaClient {
     private static byte[] hex(String text) {byte[] out=new byte[text.length()/2];for(int i=0;i<out.length;i++)out[i]=(byte)Integer.parseInt(text.substring(i*2,i*2+2),16);return out;}
     JSONArray cards() throws Exception { return query("cards",new HashMap<>()); }
     Map<String,String> args(int slot,int port) {Map<String,String> a=new HashMap<>();a.put("slot",""+slot);a.put("port",""+port);return a;}
-    JSONArray profiles(int slot,int port) throws Exception {return query("profiles",args(slot,port));}
+    Map<String,String> args(JSONObject card) throws Exception {Map<String,String> a=args(card.getInt("slot"),card.optInt("port",0));a.put("expectedEid",card.getString("eid"));return a;}
+    JSONArray profiles(JSONObject card) throws Exception {return query("profiles",args(card));}
     JSONObject info(JSONObject card) throws Exception {
-        JSONArray rows=query("cardInfo",args(card.getInt("slot"),card.optInt("port",0)));
+        JSONArray rows=query("cardInfo",args(card));
         return rows.length()==1?rows.getJSONObject(0):new JSONObject();
     }
     JSONObject delete(String eid,String iccid,boolean allowActive) throws Exception {
-        JSONObject card=card();if(!card.getString("eid").equals(eid))throw new UserError("Адаптер изменился. Начни операцию заново.");
+        JSONObject card=card(eid);if(!card.getString("eid").equals(eid))throw new UserError("Адаптер изменился. Начни операцию заново.");
         Map<String,String>a=args(card.getInt("slot"),card.optInt("port",0));
         a.put("expectedEid",eid);a.put("iccid",iccid);a.put("allowActive",Boolean.toString(allowActive));
         JSONArray rows=query("deleteProfile",a);
         if(rows.length()!=1||!rows.getJSONObject(0).optBoolean("success"))throw new UserError("Удаление не подтверждено. Обнови /esim и проверь профиль.");
         return rows.getJSONObject(0);
     }
-    JSONObject card() throws Exception {
-        JSONArray a=cards();if(a.length()!=1) throw new UserError(a.length()==0?"9eSIM не обнаружен":"Найдено несколько адаптеров. Эта версия рассчитана на один 9eSIM.");return a.getJSONObject(0);
+    JSONObject card(String eid) throws Exception {
+        JSONArray a=cards();JSONObject found=null;
+        for(int i=0;i<a.length();i++){JSONObject c=a.getJSONObject(i);if(!c.optBoolean("unavailable")&&eid.equals(c.optString("eid"))){if(found!=null)throw new UserError("Неоднозначный идентификатор адаптера. Проверь карты на телефоне");found=c;}}
+        if(found==null)throw new UserError("Выбранный адаптер изменился или недоступен. Открой /esim и выбери карту заново.");return found;
     }
     void refresh(Store s) throws Exception {
-        JSONObject card=card();int slot=card.getInt("slot"),port=card.optInt("port",0);
-        JSONArray ps=profiles(slot,port);s.put("adapter_slot",""+slot);
+        JSONArray list=cards();s.rememberCards(list);StringBuilder errors=new StringBuilder();
+        for(int i=0;i<list.length();i++) {
+            JSONObject c=list.getJSONObject(i);int slot=c.getInt("slot");
+            try {if(c.optBoolean("unavailable"))throw new UserError("Карта недоступна");refresh(s,c);}
+            catch(Exception e){s.clearActive(slot);errors.append("Слот ").append(slot+1).append(": ").append(Telegram.safe(e)).append("\n");}
+        }
+        s.put("esim_refresh_error",errors.toString().trim());
+    }
+    void refresh(Store s,JSONObject card) throws Exception {
+        int slot=card.getInt("slot");JSONArray ps=profiles(card);
         String key=null;for(int i=0;i<ps.length();i++) {JSONObject p=ps.getJSONObject(i);if(p.optBoolean("enabled")) {
             if(key!=null) throw new UserError("Несколько активных профилей: требуется отдельная настройка");key=Rules.profileKey(card.getString("eid"),p.getString("iccid"));
         }}
-        s.clearActive();if(key!=null)s.active(slot,key);
+        s.clearActive(slot);if(key!=null)s.active(slot,key);s.switching(slot,false);
     }
-    JSONObject download(String code,String confirmation) throws Exception {
+    JSONObject download(String eid,String code,String confirmation) throws Exception {
         // Certificate checking must remain enabled in the underlying LPA.
         Map<String,String> settings=new HashMap<>();settings.put("name","ignoreTlsCertificate");settings.put("enabled","false");query("setPreference",settings);
-        JSONObject card=card();Map<String,String> a=args(card.getInt("slot"),card.optInt("port",0));
+        JSONObject card=card(eid);Map<String,String> a=args(card);
         a.put("activationCode",code);if(!confirmation.isEmpty())a.put("confirmationCode",confirmation);
         JSONArray result=query("downloadProfile",a);
         if(result.length()!=1 || !result.getJSONObject(0).has("iccid")) throw new UserError("Загрузка не подтверждена. Проверь профили; повторно использовать QR-код автоматически не будем.");
         JSONObject p=result.getJSONObject(0);p.put("eid",card.getString("eid"));return p;
     }
-    void enable(String iccid) throws Exception {
-        JSONObject card=card();Map<String,String>a=args(card.getInt("slot"),card.optInt("port",0));a.put("iccid",iccid);a.put("refresh","true");
+    void enable(String eid,String iccid) throws Exception {
+        JSONObject card=card(eid);Map<String,String>a=args(card);a.put("iccid",iccid);a.put("refresh","true");
         JSONArray result=query("enableProfile",a);
         if(result.length()!=1 || !result.getJSONObject(0).optBoolean("success")) throw new UserError("Переключение не подтверждено");
     }

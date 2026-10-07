@@ -96,28 +96,34 @@ class GatewayProvider : ContentProvider() {
         if(action == "cards") {
             val result = JSONArray()
             for((slot,port) in manager.flowInternalEuiccPorts().toList()) {
-                // This integration manages one removable card with a single secure element.
-                if(manager.flowEuiccSecureElements(slot,port).toList().size != 1)continue
-                val eid = manager.withEuiccChannel(slot,port,SE) { it.lpa.eID }
-                result.put(JSONObject().put("slot",slot).put("port",port).put("eid",eid))
+                // Each removable adapter is identified independently by its own EID.
+                try {
+                    if(manager.flowEuiccSecureElements(slot,port).toList().size != 1)continue
+                    val eid = manager.withEuiccChannel(slot,port,SE) { it.lpa.eID }
+                    result.put(JSONObject().put("slot",slot).put("port",port).put("eid",eid))
+                } catch(e: Exception) {
+                    if(e is CancellationException)throw e
+                    result.put(JSONObject().put("slot",slot).put("port",port).put("unavailable",true))
+                }
             }
             return result
         }
         val slot = requireNotNull(uri.getQueryParameter("slot")).toInt()
         val port = uri.getQueryParameter("port")?.toInt() ?: 0
         require(slot in 0..7 && port in 0..7)
-        if(action == "profiles")return JSONArray(manager.withEuiccChannel(slot,port,SE) { c -> c.lpa.profiles.map { profile(it) } })
+        val expectedEid = requireNotNull(uri.getQueryParameter("expectedEid"))
+        if(action == "profiles")return JSONArray(manager.withEuiccChannel(slot,port,SE) { c -> check(c.lpa.eID == expectedEid);c.lpa.profiles.map { profile(it) } })
         if(action == "cardInfo") {
-            val info = manager.withEuiccChannel(slot,port,SE) { it.lpa.euiccInfo2 }
+            val info = manager.withEuiccChannel(slot,port,SE) { check(it.lpa.eID == expectedEid);it.lpa.euiccInfo2 }
             return JSONArray().put(JSONObject().apply { if(info != null && info.freeNvram >= 0)put("free_nvram_bytes",info.freeNvram) })
         }
         if(action == "downloadProfile") {
             val ac = LPAString.parse(requireNotNull(uri.getQueryParameter("activationCode")))
             val pin = uri.getQueryParameter("confirmationCode")
             require(!ac.confirmationCodeRequired || !pin.isNullOrBlank())
-            val before = manager.withEuiccChannel(slot,port,SE) { c -> c.lpa.profiles.map { it.iccid }.toSet() }
+            val before = manager.withEuiccChannel(slot,port,SE) { c -> check(c.lpa.eID == expectedEid);c.lpa.profiles.map { it.iccid }.toSet() }
             // Reuse the upstream task queue so local UI and Telegram cannot mutate the card concurrently.
-            val failure = service.launchProfileDownloadTask(slot,port,SE,ac.address,ac.matchingId,pin,null).waitDone()
+            val failure = service.launchProfileDownloadTask(slot,port,SE,ac.address,ac.matchingId,pin,null,expectedEid).waitDone()
             if(failure != null) {
                 if(failure !is net.typeblog.lpac_jni.LocalProfileAssistant.ProfileDownloadException)throw failure
                 val details = EsimErrors.download(failure.lpaErrorReason,failure.lastHttpResponse?.rcode ?: 0,
@@ -126,16 +132,16 @@ class GatewayProvider : ContentProvider() {
                     .getOrNull()?.takeIf { it >= 0 }?.let { details.put("free_nvram_bytes",it) }
                 return JSONArray().put(details)
             }
-            val added = manager.withEuiccChannel(slot,port,SE) { c -> c.lpa.profiles.filter { it.iccid !in before } }
+            val added = manager.withEuiccChannel(slot,port,SE) { c -> check(c.lpa.eID == expectedEid);c.lpa.profiles.filter { it.iccid !in before } }
             check(added.size == 1)
             return JSONArray().put(profile(added.single()))
         }
         if(action == "enableProfile") {
             val iccid = requireNotNull(uri.getQueryParameter("iccid"))
             require(iccid.matches(Regex("[0-9]{10,24}")))
-            service.launchProfileSwitchTask(slot,port,SE,iccid,true,20000L)
+            service.launchProfileSwitchTask(slot,port,SE,iccid,true,20000L,expectedEid)
                 .waitDone()?.let { throw it }
-            val active = manager.withEuiccChannel(slot,port,SE) { c -> c.lpa.profiles.any { it.iccid == iccid && it.state == LocalProfileInfo.State.Enabled } }
+            val active = manager.withEuiccChannel(slot,port,SE) { c -> check(c.lpa.eID == expectedEid);c.lpa.profiles.any { it.iccid == iccid && it.state == LocalProfileInfo.State.Enabled } }
             return JSONArray().put(JSONObject().put("success",active))
         }
         if(action == "deleteProfile") {

@@ -182,12 +182,14 @@ public final class MainActivity extends Activity {
     }
     private void adapterSettings() {
         page("9eSIM · дополнительно","Обычные SIM и пересылка SMS работают без этого компонента");
-        CheckBox control=new CheckBox(this);control.setText("Разрешить управление моим адаптером 9eSIM из привязанного Telegram-чата");control.setTextColor(Color.WHITE);control.setChecked(s.get("esim_control","false").equals("true"));root.addView(control);
+        CheckBox control=new CheckBox(this);control.setText("Разрешить управление моими адаптерами 9eSIM из Telegram");control.setTextColor(Color.WHITE);control.setChecked(s.get("esim_control","false").equals("true"));root.addView(control);
         control.setOnCheckedChangeListener((b,on)->{s.put("esim_control",""+on);if(!on)s.clearActive();});
         label(root,new LpaClient(this).installed()?"Управление 9eSIM встроено в приложение":"Встроенное управление недоступно в этой сборке",14,false);
         button(root,"Открыть управление 9eSIM",true,()->{try{startActivity(new Intent().setClassName(getPackageName(),"im.angry.openeuicc.ui.UnprivilegedMainActivity"));}catch(Exception e){toast("Управление картой доступно в объединённой сборке");}});
-        label(root,"Добавление через бота: /add → введи номер → отправь QR-код или строку LPA → подтверди установку. Номер сохранится за профилем.",14,false);
-        button(root,"Проверить адаптер",false,()->background(()->{LpaClient l=new LpaClient(this);JSONObject c=l.card();l.refresh(s);return "Адаптер обнаружен, слот "+(c.getInt("slot")+1);},this::toast));
+        label(root,"Поддерживаются два адаптера в двух SIM-слотах. В боте /esim → выбери карту. Добавление: /add → выбери адаптер → введи номер → отправь QR-код → подтверди. При одном адаптере выбор не требуется.",14,false);
+        TextView cardsStatus=label(card(),"Нажми «Проверить адаптеры», чтобы увидеть слоты и карты.",15,false);
+        button(root,"Проверить адаптеры",false,()->background(()->{LpaClient l=new LpaClient(this);JSONArray cards=l.cards();s.rememberCards(cards);l.refresh(s);StringBuilder found=new StringBuilder("Найдено карт: ").append(cards.length());
+            for(int i=0;i<cards.length();i++){JSONObject c=cards.getJSONObject(i);String eid=c.optString("eid");found.append("\nСлот ").append(c.getInt("slot")+1).append(c.optBoolean("unavailable")?" · недоступен":" · EID …"+eid.substring(Math.max(0,eid.length()-6)));}return found.toString();},cardsStatus::setText));
         button(root,"Назад",false,this::settings);
     }
     private void physical() {
@@ -196,7 +198,7 @@ public final class MainActivity extends Activity {
         try {List<SubscriptionInfo> list=getSystemService(SubscriptionManager.class).getActiveSubscriptionInfoList();
             if(list==null||list.isEmpty())label(root,"Активных SIM пока нет",16,false);
             else for(SubscriptionInfo info:list) {
-                if(s.get("esim_control","false").equals("true") && s.get("adapter_slot","-1").equals(""+info.getSimSlotIndex())) {
+                if(s.managed(info.getSimSlotIndex())) {
                     label(root,"Слот "+(info.getSimSlotIndex()+1)+" · управляемый адаптер 9eSIM. Номер задаётся каждому профилю в разделе 9eSIM.",16,false);continue;
                 }
                 label(root,"Слот "+(info.getSimSlotIndex()+1)+" · "+info.getDisplayName(),17,true);

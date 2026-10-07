@@ -1,5 +1,11 @@
-"""Bind bot deletion and its preceding disable to the confirmed EID inside the LPA queue."""
+"""Bind bot download, switch and deletion to the confirmed EID inside the LPA queue."""
 def patch_service(source):
+    old = '        imei: String?\n    ): ForegroundTaskSubscriberFlow ='
+    assert source.count(old) == 1, 'Pinned download signature changed'
+    source = source.replace(old, '        imei: String?,\n        expectedEid: String? = null\n    ): ForegroundTaskSubscriberFlow =')
+    old = '                    channel.lpa.downloadProfile('
+    assert source.count(old) == 1, 'Pinned download operation changed'
+    source = source.replace(old, '                    if (expectedEid != null)check(channel.lpa.eID == expectedEid) { "Adapter changed" }\n'+old)
     old = '        iccid: String\n    ): ForegroundTaskSubscriberFlow ='
     assert source.count(old) == 1, 'Pinned delete signature changed'
     source = source.replace(old, '        iccid: String,\n        expectedEid: String? = null\n    ): ForegroundTaskSubscriberFlow =')

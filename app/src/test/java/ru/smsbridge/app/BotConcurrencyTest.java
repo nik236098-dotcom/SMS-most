@@ -25,11 +25,12 @@ public class BotConcurrencyTest {
         tasks=new AdapterTasks(worker,timer,45000);bot=new Bot(s,lpa,()->new JSONArray(),tasks);
         when(s.get(anyString(),anyString())).thenAnswer(i->values.getOrDefault(i.getArgument(0),i.getArgument(1)));
         doAnswer(i->{values.put(i.getArgument(0),i.getArgument(1));return null;}).when(s).put(anyString(),anyString());
+        TestStoreRouting.attach(s);
         when(s.running()).thenReturn(true);when(s.epoch()).thenReturn("session");when(s.chat()).thenReturn(456L);
         when(s.chats()).thenReturn(java.util.Arrays.asList(456L,789L));when(s.beginOperation(anyLong())).thenReturn(true);
         when(s.number(anyString())).thenReturn("+79991234567");values.put("esim_control","true");
-        when(lpa.installed()).thenReturn(true);when(lpa.card()).thenReturn(new JSONObject().put("eid",EID).put("slot",0).put("port",0));
-        when(lpa.profiles(0,0)).thenReturn(new JSONArray().put(new JSONObject().put("iccid",ICCID).put("enabled",false)));
+        when(lpa.installed()).thenReturn(true);when(lpa.card(anyString())).thenReturn(new JSONObject().put("eid",EID).put("slot",0).put("port",0));
+        when(lpa.profiles(any(JSONObject.class))).thenReturn(new JSONArray().put(new JSONObject().put("iccid",ICCID).put("enabled",false)));
     }
     @After public void finish() throws Exception {release.countDown();worker.shutdown();assertTrue(worker.awaitTermination(3,TimeUnit.SECONDS));}
     void block() throws Exception {entered.countDown();assertTrue("test release",release.await(3,TimeUnit.SECONDS));}
@@ -80,13 +81,13 @@ public class BotConcurrencyTest {
         send("/esim",null,456);verify(api).send(eq(456L),contains("Новый запрос не запущен"),isNull());complete();
     }
     @Test public void blockedDownloadDoesNotBlockCommandsOrRepeatQr() throws Exception {
-        draft("confirm_add");when(lpa.download(anyString(),anyString())).thenAnswer(i->{block();return new JSONObject().put("eid",EID).put("iccid",ICCID);});
-        when(lpa.profiles(0,0)).thenReturn(new JSONArray().put(new JSONObject().put("iccid",ICCID).put("enabled",true)));
+        draft("confirm_add");when(lpa.download(eq(EID),anyString(),anyString())).thenAnswer(i->{block();return new JSONObject().put("eid",EID).put("iccid",ICCID);});
+        when(lpa.profiles(any(JSONObject.class))).thenReturn(new JSONArray().put(new JSONObject().put("iccid",ICCID).put("enabled",true)));
         send("","confirm:nonce",456);awaitBlocked();send("/start",null,456);send("","confirm:nonce",456);
-        verify(api).send(eq(456L),contains("SMS Мост"),notNull());complete();verify(lpa,times(1)).download(anyString(),anyString());
+        verify(api).send(eq(456L),contains("SMS Мост"),notNull());complete();verify(lpa,times(1)).download(eq(EID),anyString(),anyString());
     }
     @Test public void blockedSwitchDoesNotBlockCommands() throws Exception {
-        draft("confirm_enable");doAnswer(i->{block();when(lpa.profiles(0,0)).thenReturn(new JSONArray().put(new JSONObject().put("iccid",ICCID).put("enabled",true)));return null;}).when(lpa).enable(ICCID);
+        draft("confirm_enable");doAnswer(i->{block();when(lpa.profiles(any(JSONObject.class))).thenReturn(new JSONArray().put(new JSONObject().put("iccid",ICCID).put("enabled",true)));return null;}).when(lpa).enable(EID,ICCID);
         send("","confirm:nonce",456);awaitBlocked();send("/status",null,456);verify(api).send(eq(456L),contains("Телефон на связи"),isNull());complete();
     }
     @Test public void nativeFailureIsQueuedAndDoesNotDiscardBindingOrKeepGateLocked() throws Exception {
@@ -95,11 +96,11 @@ public class BotConcurrencyTest {
         verify(s).enqueueNotice(anyString(),eq(456L),contains("Нет ответа карты"));verify(s,never()).forgetNumber(anyString());
     }
     @Test public void verifiedActivationResultSurvivesTelegramNetworkFailure() throws Exception {
-        draft("confirm_enable");doAnswer(i->{when(lpa.profiles(0,0)).thenReturn(new JSONArray().put(new JSONObject().put("iccid",ICCID).put("enabled",true)));return null;}).when(lpa).enable(ICCID);
+        draft("confirm_enable");doAnswer(i->{when(lpa.profiles(any(JSONObject.class))).thenReturn(new JSONArray().put(new JSONObject().put("iccid",ICCID).put("enabled",true)));return null;}).when(lpa).enable(EID,ICCID);
         doThrow(new java.net.SocketTimeoutException()).when(api).send(eq(456L),contains("Активирован профиль"),any());
         send("","confirm:nonce",456);worker.submit(()->{}).get(2,TimeUnit.SECONDS);
         verify(s).enqueueNotice(startsWith("activation-result:"),eq(456L),contains("Активирован профиль"));
-        assertTrue(values.get("esim_last_result").contains("Активирован профиль"));assertEquals("false",values.get("switching"));
+        assertTrue(values.get("esim_last_result").contains("Активирован профиль"));assertEquals("false",values.get("switching:0"));
     }
     @Test public void unauthorizedUpdateCannotOccupyAdapterWorker() throws Exception {
         send("/esim",null,999);assertFalse(tasks.busy());assertTrue(alarms.isEmpty());verifyNoInteractions(lpa);
@@ -113,7 +114,7 @@ public class BotConcurrencyTest {
         draft("confirm_delete");values.put("last_delete",new JSONObject(values.get("draft:456")).put("chat_id",456).toString());
     }
     @Test public void interruptedDeleteIsVerifiedReadOnlyAndResultRestoredWhenProfileAbsent() throws Exception {
-        interruptedDelete();when(lpa.profiles(0,0)).thenReturn(new JSONArray());bot.reconcile();
+        interruptedDelete();when(lpa.profiles(any(JSONObject.class))).thenReturn(new JSONArray());bot.reconcile();
         verify(lpa,never()).delete(anyString(),anyString(),anyBoolean());verify(s).forgetNumber(Rules.profileKey(EID,ICCID));
         verify(s).enqueueNotice(startsWith("delete-result:"),eq(456L),contains("отсутствует на прежнем адаптере"));assertEquals("{}",values.get("last_delete"));
     }
@@ -122,8 +123,8 @@ public class BotConcurrencyTest {
         verify(s).enqueueNotice(anyString(),eq(456L),contains("профиль всё ещё на карте"));
     }
     @Test public void wrongCardOrFailedProfileReadNeverProvesDeletion() throws Exception {
-        interruptedDelete();when(lpa.card()).thenReturn(new JSONObject().put("eid","different"));assertThrows(UserError.class,()->bot.reconcile());
-        when(lpa.card()).thenReturn(new JSONObject().put("eid",EID).put("slot",0));when(lpa.profiles(0,0)).thenThrow(new UserError("unreadable"));
-        assertThrows(UserError.class,()->bot.reconcile());verify(s,never()).forgetNumber(anyString());verify(s,never()).enqueueNotice(anyString(),anyLong(),anyString());assertFalse(values.get("last_delete").equals("{}"));
+        interruptedDelete();when(lpa.card(anyString())).thenReturn(new JSONObject().put("eid","different"));bot.reconcile();
+        when(lpa.card(anyString())).thenReturn(new JSONObject().put("eid",EID).put("slot",0));when(lpa.profiles(any(JSONObject.class))).thenThrow(new UserError("unreadable"));
+        bot.reconcile();verify(s,never()).forgetNumber(anyString());verify(s,never()).enqueueNotice(anyString(),anyLong(),anyString());assertEquals(1,s.pendingDeletes().length());
     }
 }
