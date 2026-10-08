@@ -26,7 +26,7 @@ public final class RelayService extends Service {
     private ScheduledExecutorService supervisor;private RecoveringTask sender,poller,adapter;
     private volatile boolean stopped;private Telegram pollingApi;private Bot worker;
     private volatile long nextPoll;private int pollFailures;
-    private ConnectivityManager.NetworkCallback networkCallback;private volatile boolean networkReady;
+    private ConnectivityManager.NetworkCallback networkCallback;private volatile boolean networkReady;private Network defaultNetwork;
     static void schedule(Context c) {
         JobScheduler jobs=c.getSystemService(JobScheduler.class);
         // Do not reset the retry interval on every SMS or foreground-service restart.
@@ -68,9 +68,10 @@ public final class RelayService extends Service {
             networkCallback=new ConnectivityManager.NetworkCallback() {
                 @Override public void onCapabilitiesChanged(Network network,NetworkCapabilities capabilities) {
                     boolean ready=capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED);
-                    if(ready&&!networkReady)try{s.retry();reconnect();}catch(Exception e){s.put("bot_error",Telegram.safe(e));}networkReady=ready;
+                    boolean changed=!network.equals(defaultNetwork);defaultNetwork=network;
+                    if(ready&&(changed||!networkReady))try{s.retry();reconnect();}catch(Exception e){try{s.put("bot_error",Telegram.safe(e));}catch(Exception ignored){}}networkReady=ready;
                 }
-                @Override public void onLost(Network network){networkReady=false;}
+                @Override public void onLost(Network network){if(network.equals(defaultNetwork))networkReady=false;}
             };
             getSystemService(ConnectivityManager.class).registerDefaultNetworkCallback(networkCallback);
         }catch(RuntimeException e){networkCallback=null;}

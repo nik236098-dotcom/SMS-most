@@ -16,7 +16,8 @@ public class TelegramTransportTest {
         server=new MockWebServer();server.start();worker=Executors.newSingleThreadExecutor();
         client=new OkHttpClient.Builder().connectTimeout(1,TimeUnit.SECONDS).readTimeout(3,TimeUnit.SECONDS).writeTimeout(1,TimeUnit.SECONDS)
             .callTimeout(400,TimeUnit.MILLISECONDS).retryOnConnectionFailure(false).followRedirects(false).followSslRedirects(false).build();
-        api=new Telegram(TOKEN,client,server.url("/").toString());
+        // MockWebServer listens on IPv4 here; localhost also resolves to an unbound IPv6 port.
+        api=new Telegram(TOKEN,client,server.url("/").newBuilder().host("127.0.0.1").build().toString());
     }
     @After public void finish() throws Exception {api.close();worker.shutdownNow();client.dispatcher().executorService().shutdownNow();client.connectionPool().evictAll();server.shutdown();assertTrue(worker.awaitTermination(2,TimeUnit.SECONDS));}
     MockResponse ok(){return new MockResponse().setBody("{\"ok\":true,\"result\":[]}");}
