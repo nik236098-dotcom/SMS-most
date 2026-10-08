@@ -80,6 +80,7 @@ final class Bot {
         String session=s.epoch();
         if(cb!=null)try{t.call("answerCallbackQuery",new JSONObject().put("callback_query_id",cb.getString("id")));}catch(Exception ignored){}
         boolean submitted=tasks.submit(()->{
+            s.put("esim_native_phase","");
             s.put("esim_task_started",""+System.currentTimeMillis());s.put("esim_task_state","running");
             s.put("esim_task_label",command.startsWith("confirm:")?"Подтверждённая операция с профилем":command.equals("/profiles")||command.equals("profiles")?"Чтение SIM-карт Android":"Запрос к 9eSIM");
         },()->{
@@ -418,10 +419,13 @@ final class Bot {
                 iccid=p.getString("iccid");s.put("esim_last_result","Профиль загружен на карту; проверяем активацию. ICCID: "+iccid);
                 String key=Rules.profileKey(p.getString("eid"),iccid);number=d.getString("number");s.number(key,number);
             } else number=s.number(d.getString("key"));
-            lpa.enable(d.getString("eid"),iccid);
-            card=lpa.card(d.getString("eid"));lpa.refresh(s,card);JSONArray ps=lpa.profiles(card);boolean active=false;
+            s.put("esim_task_label","Переключение и проверка профиля на карте");
+            JSONArray ps=lpa.enable(card,iccid);boolean active=false;
             for(int i=0;i<ps.length();i++) {JSONObject p=ps.getJSONObject(i);if(p.optString("iccid").equals(iccid)&&p.optBoolean("enabled"))active=true;}
             if(!active)throw new UserError("Профиль сохранён, но активация не подтверждена. Проверь список eSIM.");
+            // The private provider already verified this EID and returned a fresh snapshot.
+            // Reopening every card and rereading profiles here delayed the success message.
+            lpa.refresh(s,card,ps);
             s.switching(slot,false);refreshed=true;
             if(stage.equals("confirm_add"))s.put("last_install","{}");
             String result=number.equals("Номер не задан")?"🟢 Активирован профиль с ICCID …"+iccid.substring(Math.max(0,iccid.length()-6))+".\nНомер пока не задан. Его можно указать в профиле.":"🟢 Активирован профиль "+number+".\nВ новых SMS будет указан этот номер.";
@@ -479,7 +483,9 @@ final class Bot {
         String text="9eSIM: "+(state.equals("running")?s.get("esim_task_label","операция выполняется"):state.equals("interrupted")?"результат предыдущей операции неизвестен":"нет текущей операции");
         if(state.equals("running"))try{text+=" · "+Math.max(0,(System.currentTimeMillis()-Long.parseLong(s.get("esim_task_started","0")))/1000)+" сек.";}catch(NumberFormatException ignored){}
         String refresh=s.get("esim_refresh_error","");
-        return text+(refresh.isEmpty()?"":"\n"+refresh)+(result.isEmpty()?"":"\nПоследний результат:\n"+result);
+        String phase=s.get("esim_native_phase","");
+        String timing=s.get("esim_switch_timing","");
+        return text+(state.equals("running")&&!phase.isEmpty()?"\n"+phase:"")+(timing.isEmpty()?"":"\nПоследнее переключение: "+timing)+(refresh.isEmpty()?"":"\n"+refresh)+(result.isEmpty()?"":"\nПоследний результат:\n"+result);
     }
     private void recent(Telegram t,JSONObject m) throws Exception {
         StringBuilder b=new StringBuilder("Последние SMS\n");JSONArray rows=s.recent(replyTo(),"sms");

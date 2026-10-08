@@ -74,7 +74,10 @@ final class LpaClient {
         s.put("esim_refresh_error",errors.toString().trim());
     }
     void refresh(Store s,JSONObject card) throws Exception {
-        int slot=card.getInt("slot");JSONArray ps=profiles(card);
+        refresh(s,card,profiles(card));
+    }
+    void refresh(Store s,JSONObject card,JSONArray ps) throws Exception {
+        int slot=card.getInt("slot");
         String key=null;for(int i=0;i<ps.length();i++) {JSONObject p=ps.getJSONObject(i);if(p.optBoolean("enabled")) {
             if(key!=null) throw new UserError("Несколько активных профилей: требуется отдельная настройка");key=Rules.profileKey(card.getString("eid"),p.getString("iccid"));
         }}
@@ -89,9 +92,16 @@ final class LpaClient {
         if(result.length()!=1 || !result.getJSONObject(0).has("iccid")) throw new UserError("Загрузка не подтверждена. Проверь профили; повторно использовать QR-код автоматически не будем.");
         JSONObject p=result.getJSONObject(0);p.put("eid",card.getString("eid"));return p;
     }
-    void enable(String eid,String iccid) throws Exception {
-        JSONObject card=card(eid);Map<String,String>a=args(card);a.put("iccid",iccid);a.put("refresh","true");
+    JSONArray enable(JSONObject card,String iccid) throws Exception {
+        Map<String,String>a=args(card);a.put("iccid",iccid);a.put("refresh","true");
         JSONArray result=query("enableProfile",a);
         if(result.length()!=1 || !result.getJSONObject(0).optBoolean("success")) throw new UserError("Переключение не подтверждено");
+        JSONObject confirmed=result.getJSONObject(0);
+        if(!card.getString("eid").equals(confirmed.optString("eid")) || card.getInt("slot")!=confirmed.optInt("slot",-1)
+            || card.optInt("port",0)!=confirmed.optInt("port",-1))throw new UserError("Адаптер изменился. Переключение не подтверждено");
+        JSONArray ps=confirmed.getJSONArray("profiles");int enabled=0;boolean selected=false;
+        for(int i=0;i<ps.length();i++){JSONObject p=ps.getJSONObject(i);if(p.optBoolean("enabled")){enabled++;selected=iccid.equals(p.optString("iccid"));}}
+        if(enabled!=1||!selected)throw new UserError("Активация не подтверждена. Проверь список eSIM.");
+        return ps;
     }
 }

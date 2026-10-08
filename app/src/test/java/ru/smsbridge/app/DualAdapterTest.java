@@ -13,6 +13,7 @@ import static org.mockito.ArgumentMatchers.*;
 /** Real bot flows: two cards deliberately share an ICCID and operator name. */
 public class DualAdapterTest {
     static final String A="89000000000000000000000000000001",B="89000000000000000000000000000002",ICCID="8900000000000000001";
+    private JSONObject selected(String eid){return argThat(c->c!=null&&eid.equals(c.optString("eid")));}
     Store s;LpaClient lpa;Telegram api;Bot bot;JSONArray cards;long update;
     Map<String,String> values=new HashMap<>(),numbers=new HashMap<>();
     Map<String,JSONArray> profiles=new HashMap<>();
@@ -32,7 +33,7 @@ public class DualAdapterTest {
         when(lpa.profiles(any(JSONObject.class))).thenAnswer(i->new JSONArray(profiles.get(((JSONObject)i.getArgument(0)).getString("eid")).toString()));
         for(String eid:new String[]{A,B})profiles.put(eid,new JSONArray().put(new JSONObject().put("iccid",ICCID).put("enabled",false).put("provider","Билайн").put("nickname","Билайн")));
         numbers.put(Rules.profileKey(A,ICCID),"+79991111111");numbers.put(Rules.profileKey(B,ICCID),"+79992222222");
-        doAnswer(i->{profiles.get(i.getArgument(0)).getJSONObject(0).put("enabled",true);return null;}).when(lpa).enable(anyString(),anyString());
+        doAnswer(i->{String eid=((JSONObject)i.getArgument(0)).getString("eid");profiles.get(eid).getJSONObject(0).put("enabled",true);return new JSONArray(profiles.get(eid).toString());}).when(lpa).enable(any(JSONObject.class),anyString());
     }
     static JSONObject card(String eid,int slot) throws Exception {return new JSONObject().put("eid",eid).put("slot",slot).put("port",0);}
     void send(String text,String callback,long chat) throws Exception {
@@ -55,18 +56,18 @@ public class DualAdapterTest {
     }
     @Test public void switchWithIdenticalIccidsTargetsOnlySelectedCard() throws Exception {
         pickSecond();clearInvocations(s);tap(confirm());
-        verify(lpa).enable(B,ICCID);verify(lpa,never()).enable(eq(A),anyString());
+        verify(lpa).enable(selected(B),eq(ICCID));verify(lpa,never()).enable(selected(A),anyString());
         verify(s).clearActive(1);verify(s,never()).clearActive(0);verify(s,never()).clearActive();
         assertFalse(s.switching(1));assertFalse(s.switching(0));
         verify(api).send(eq(456L),argThat(t->t.contains("+79992222222")&&t.contains("слот 2")),notNull());
     }
     @Test public void reorderedAndMovedAdaptersKeepTheirIdentity() throws Exception {
         pickSecond();cards=new JSONArray().put(card(B,0)).put(card(A,1));tap(confirm());
-        verify(lpa).enable(B,ICCID);verify(lpa).refresh(eq(s),argThat(c->c.optString("eid").equals(B)&&c.optInt("slot")==0));
+        verify(lpa).enable(selected(B),eq(ICCID));verify(lpa).refresh(eq(s),argThat(c->c.optString("eid").equals(B)&&c.optInt("slot")==0),any(JSONArray.class));
     }
     @Test public void unpluggedSelectionNeverFallsBackToOtherCard() throws Exception {
         pickSecond();cards=new JSONArray().put(card(A,0));tap(confirm());
-        verify(lpa,never()).enable(anyString(),anyString());verify(api).send(eq(456L),contains("недоступен"),isNull());
+        verify(lpa,never()).enable(any(JSONObject.class),anyString());verify(api).send(eq(456L),contains("недоступен"),isNull());
     }
     @Test public void downloadRequiresDestinationAndKeepsManualNumberOnThatCard() throws Exception {
         command("/add");assertFalse(new JSONObject(values.get("draft:456")).has("stage"));
@@ -84,11 +85,11 @@ public class DualAdapterTest {
     }
     @Test public void oldProfileButtonCannotSelectProfileOnNewCard() throws Exception {
         command("/esim");tap("card:"+A);String old=select(456);tap("card:"+B);tap(old);
-        verify(api).send(eq(456L),contains("Обнови список профилей"),isNull());verify(lpa,never()).enable(anyString(),anyString());
+        verify(api).send(eq(456L),contains("Обнови список профилей"),isNull());verify(lpa,never()).enable(any(JSONObject.class),anyString());
     }
     @Test public void authorizedUsersKeepIndependentSelections() throws Exception {
         command("/esim");tap("card:"+B);send("","card:"+A,789);
-        tap(select(456));tap(confirm());verify(lpa).enable(B,ICCID);
+        tap(select(456));tap(confirm());verify(lpa).enable(selected(B),eq(ICCID));
         assertEquals(B,values.get("selected_adapter:456"));assertEquals(A,values.get("selected_adapter:789"));
     }
     @Test public void unreadableFirstCardDoesNotClearSecondCardsActiveProfile() throws Exception {

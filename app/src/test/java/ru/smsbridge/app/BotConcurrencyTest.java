@@ -13,6 +13,7 @@ import static org.mockito.ArgumentMatchers.*;
 
 /** The adapter really blocks on another thread; getUpdates and ordinary commands must still run. */
 public class BotConcurrencyTest {
+    private JSONObject selectedCard(){return argThat(c->c!=null&&EID.equals(c.optString("eid")));}
     static final String EID="89000000000000000000000000000001",ICCID="8900000000000000001";
     Store s;Telegram api;LpaClient lpa;Bot bot;AdapterTasks tasks;
     Map<String,String> values;ExecutorService worker;List<Runnable> alarms;long update;
@@ -92,7 +93,7 @@ public class BotConcurrencyTest {
         verify(api).send(eq(456L),contains("SMS Мост"),notNull());complete();verify(lpa,times(1)).download(eq(EID),anyString(),anyString());
     }
     @Test public void blockedSwitchDoesNotBlockCommands() throws Exception {
-        draft("confirm_enable");doAnswer(i->{block();when(lpa.profiles(any(JSONObject.class))).thenReturn(new JSONArray().put(new JSONObject().put("iccid",ICCID).put("enabled",true)));return null;}).when(lpa).enable(EID,ICCID);
+        draft("confirm_enable");doAnswer(i->{block();return new JSONArray().put(new JSONObject().put("iccid",ICCID).put("enabled",true));}).when(lpa).enable(selectedCard(),eq(ICCID));
         send("","confirm:nonce",456);awaitBlocked();send("/status",null,456);verify(api).send(eq(456L),contains("Телефон на связи"),isNull());complete();
     }
     @Test public void nativeFailureIsQueuedAndDoesNotDiscardBindingOrKeepGateLocked() throws Exception {
@@ -101,7 +102,7 @@ public class BotConcurrencyTest {
         verify(s).enqueueNotice(anyString(),eq(456L),contains("Нет ответа карты"));verify(s,never()).forgetNumber(anyString());
     }
     @Test public void verifiedActivationResultSurvivesTelegramNetworkFailure() throws Exception {
-        draft("confirm_enable");doAnswer(i->{when(lpa.profiles(any(JSONObject.class))).thenReturn(new JSONArray().put(new JSONObject().put("iccid",ICCID).put("enabled",true)));return null;}).when(lpa).enable(EID,ICCID);
+        draft("confirm_enable");doAnswer(i->{return new JSONArray().put(new JSONObject().put("iccid",ICCID).put("enabled",true));}).when(lpa).enable(selectedCard(),eq(ICCID));
         doThrow(new java.net.SocketTimeoutException()).when(api).send(eq(456L),contains("Активирован профиль"),any());
         send("","confirm:nonce",456);worker.submit(()->{}).get(2,TimeUnit.SECONDS);
         verify(s).enqueueNotice(startsWith("activation-result:"),eq(456L),contains("Активирован профиль"));

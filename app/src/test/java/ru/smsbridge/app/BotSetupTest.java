@@ -12,6 +12,7 @@ import static org.mockito.ArgumentMatchers.*;
 
 /** Exercises the real Bot handler with Telegram and storage replaced by test doubles. */
 public class BotSetupTest {
+    private JSONObject selectedCard(){return argThat(c->c!=null&&EID.equals(c.optString("eid")));}
     static final String EID="89000000000000000000000000000001";
     Store s;Telegram api;Bot bot;Map<String,String> values;long owner;
     @Before public void setup() throws Exception {
@@ -180,6 +181,7 @@ public class BotSetupTest {
         when(adapter.card(anyString())).thenReturn(new JSONObject().put("slot",0).put("port",0).put("eid","89000000000000000000000000000001"));
         when(adapter.download(eq(EID),anyString(),anyString())).thenReturn(new JSONObject().put("eid","89000000000000000000000000000001").put("iccid","8900000000000000001"));
         when(adapter.profiles(any(JSONObject.class))).thenReturn(new JSONArray().put(new JSONObject().put("iccid","8900000000000000001").put("enabled",true)));
+        when(adapter.enable(selectedCard(),anyString())).thenReturn(new JSONArray().put(new JSONObject().put("iccid","8900000000000000001").put("enabled",true)));
         when(adapter.cards()).thenAnswer(i->new JSONArray().put(adapter.card(EID)));
         bot=new Bot(s,adapter);updates(message("/add",456,"private"));bot.poll(api,0);
         updates(message("+79991234567",456,"private"));bot.poll(api,0);
@@ -193,7 +195,7 @@ public class BotSetupTest {
         org.mockito.InOrder order=inOrder(adapter,s);
         order.verify(adapter).download(EID,"LPA:1$smdp.example$MATCH","");
         order.verify(s).number(Rules.profileKey("89000000000000000000000000000001","8900000000000000001"),"+79991234567");
-        order.verify(adapter).enable(EID,"8900000000000000001");order.verify(adapter).refresh(eq(s),any(JSONObject.class));
+        order.verify(adapter).enable(selectedCard(),eq("8900000000000000001"));order.verify(adapter).refresh(eq(s),any(JSONObject.class),any(JSONArray.class));
         verify(api).send(eq(456L),contains("Активирован профиль +79991234567"),notNull());
         assertEquals("{}",values.get("last_install"));assertEquals("false",values.get("switching:0"));
     }
@@ -204,7 +206,7 @@ public class BotSetupTest {
     }
     @Test public void failedEsimDownloadDoesNotActivateOrClaimSuccess() throws Exception {
         LpaClient adapter=beginEsim("LPA:1$smdp.example$MATCH");when(adapter.download(eq(EID),anyString(),anyString())).thenThrow(new UserError("Оператор отклонил загрузку"));
-        confirmEsim();verify(adapter,never()).enable(eq(EID),anyString());verify(s,never()).number(anyString(),anyString());
+        confirmEsim();verify(adapter,never()).enable(selectedCard(),anyString());verify(s,never()).number(anyString(),anyString());
         verify(api,never()).send(anyLong(),contains("Активирован профиль"),any());
         assertFalse(values.get("last_install").equals("{}"));
     }

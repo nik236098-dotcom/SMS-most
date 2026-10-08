@@ -22,10 +22,16 @@ def patch_service(source):
                     }''')
     old = '        reconnectTimeoutMillis: Long = 0 // 0 = do not wait for reconnect'
     assert source.count(old) == 1, 'Pinned switch signature changed'
-    source = source.replace(old, '        reconnectTimeoutMillis: Long = 0, // 0 = do not wait for reconnect\n        expectedEid: String? = null')
+    source = source.replace(old, '        reconnectTimeoutMillis: Long = 0, // 0 = do not wait for reconnect\n        expectedEid: String? = null,\n        phase: (String) -> Unit = {}')
     old = '                        val refresh = preferenceRepository.refreshAfterSwitchFlow.first()'
     assert source.count(old) == 1, 'Pinned switch operation changed'
-    source = source.replace(old, '                        if (expectedEid != null)check(channel.lpa.eID == expectedEid) { "Adapter changed" }\n'+old)
+    source = source.replace(old, '                        if (expectedEid != null)check(channel.lpa.eID == expectedEid) { "Adapter changed" }\n                        phase("Команда переключения")\n'+old)
+    old = '                if (reconnectTimeoutMillis > 0) {'
+    assert source.count(old) == 1
+    source = source.replace(old,old+'\n                    phase("Переподключение модема")')
+    old = '                preferenceRepository.notificationSwitchFlow.first()'
+    assert source.count(old) == 1
+    source = source.replace(old,'                phase("Уведомление оператора")\n'+old)
     return source
 
 def patch_profile_read(source):

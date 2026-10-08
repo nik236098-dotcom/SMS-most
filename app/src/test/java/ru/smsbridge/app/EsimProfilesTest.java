@@ -13,6 +13,7 @@ import static org.mockito.ArgumentMatchers.*;
 
 /** Drives the real bot through profile navigation and switching with a simulated card. */
 public class EsimProfilesTest {
+    private JSONObject selectedCard(){return argThat(c->c!=null&&EID.equals(c.optString("eid")));}
     static final long CHAT=456L;
     static final String EID="89000000000000000000000000000001";
     Store store;Telegram api;LpaClient adapter;Bot bot;
@@ -33,7 +34,7 @@ public class EsimProfilesTest {
         when(adapter.profiles(any(JSONObject.class))).thenAnswer(i->new JSONArray(profiles.toString()));
         doAnswer(i->{String iccid=i.getArgument(1);for(int j=0;j<profiles.length();j++) {
             JSONObject p=profiles.getJSONObject(j);p.put("enabled",p.getString("iccid").equals(iccid));
-        }return null;}).when(adapter).enable(eq(EID),anyString());
+        }return new JSONArray(profiles.toString());}).when(adapter).enable(selectedCard(),anyString());
         when(adapter.cards()).thenAnswer(i->new JSONArray().put(adapter.card(EID)));
         doAnswer(i->{store.switching(0,false);return null;}).when(adapter).refresh(store);
         TestStoreRouting.attach(store);
@@ -92,44 +93,56 @@ public class EsimProfilesTest {
         for(int i=0;i<rows.length();i++)for(int j=0;j<rows.getJSONArray(i).length();j++)
             assertTrue(rows.getJSONArray(i).getJSONObject(j).getString("callback_data").getBytes(java.nio.charset.StandardCharsets.UTF_8).length<=64);
         tap(stale);verify(api).send(eq(CHAT),contains("Обнови список профилей"),isNull());
-        verify(adapter,never()).enable(eq(EID),anyString());
+        verify(adapter,never()).enable(selectedCard(),anyString());
         profiles=new JSONArray();tap("adapter:2");assertTrue(lastEdit().getString("text").contains("пока нет профилей"));
     }
     @Test public void switchUsesExactIccidAfterListOrderChanges() throws Exception {
         numbers.put(Rules.profileKey(EID,iccid(2)),"+79992222222");command("/esim");String selected=choice(1,CHAT);
         profiles=new JSONArray().put(profiles.getJSONObject(1)).put(profiles.getJSONObject(0));tap(selected);
         assertTrue(lastEdit().getString("text").contains(iccid(2)));tap(confirmation());
-        verify(adapter).enable(EID,iccid(2));verify(adapter).refresh(eq(store),any(JSONObject.class));
+        verify(adapter).enable(selectedCard(),eq(iccid(2)));verify(adapter).refresh(eq(store),any(JSONObject.class),any(JSONArray.class));
         verify(api).send(eq(CHAT),contains("Активирован профиль +79992222222"),notNull());
         assertEquals("false",settings.get("switching:0"));
     }
     @Test public void unnamedProfileCanSwitchWithoutInventingNumber() throws Exception {
         command("/esim");tap(choice(1,CHAT));tap(confirmation());
-        verify(adapter).enable(EID,iccid(2));verify(api).send(eq(CHAT),contains("Номер пока не задан"),notNull());
+        verify(adapter).enable(selectedCard(),eq(iccid(2)));verify(api).send(eq(CHAT),contains("Номер пока не задан"),notNull());
         verify(store,never()).number(anyString(),anyString());
+    }
+    @Test public void verifiedSwitchDoesNotWaitForAnotherScanOrProfileRead() throws Exception {
+        command("/esim");tap(choice(1,CHAT));clearInvocations(adapter);
+        doAnswer(i->{
+            JSONArray confirmed=new JSONArray().put(new JSONObject().put("iccid",iccid(2)).put("enabled",true));
+            when(adapter.card(anyString())).thenThrow(new UserError("Unnecessary scan blocked"));
+            when(adapter.profiles(any(JSONObject.class))).thenThrow(new UserError("Unnecessary reread blocked"));
+            return confirmed;
+        }).when(adapter).enable(selectedCard(),eq(iccid(2)));
+        tap(confirmation());verify(api).send(eq(CHAT),contains("Активирован профиль"),notNull());
+        verify(adapter,times(1)).card(EID);verify(adapter,times(1)).profiles(any(JSONObject.class));
+        verify(adapter).refresh(eq(store),selectedCard(),argThat(ps->ps.length()==1&&ps.optJSONObject(0).optBoolean("enabled")));
     }
     @Test public void activeProfileDoesNotOfferRedundantSwitch() throws Exception {
         command("/esim");tap(choice(0,CHAT));JSONObject output=lastEdit();
         assertTrue(output.getString("text").contains("уже активен"));
         assertFalse(output.getJSONObject("reply_markup").toString().contains("confirm:"));
-        verify(adapter,never()).enable(eq(EID),anyString());
+        verify(adapter,never()).enable(selectedCard(),anyString());
     }
     @Test public void profileActivatedElsewhereBeforeConfirmIsNotSwitchedAgain() throws Exception {
         command("/esim");tap(choice(1,CHAT));profiles.getJSONObject(1).put("enabled",true);
         profiles.getJSONObject(0).put("enabled",false);tap(confirmation());
-        verify(adapter,never()).enable(eq(EID),anyString());assertTrue(lastEdit().getString("text").contains("уже активен"));
+        verify(adapter,never()).enable(selectedCard(),anyString());assertTrue(lastEdit().getString("text").contains("уже активен"));
     }
     @Test public void repeatedConfirmationSwitchesOnlyOnce() throws Exception {
         command("/esim");tap(choice(1,CHAT));String confirm=confirmation();tap(confirm);tap(confirm);
-        verify(adapter,times(1)).enable(EID,iccid(2));
+        verify(adapter,times(1)).enable(selectedCard(),eq(iccid(2)));
     }
     @Test public void removedProfileCannotBeSwitchedFromStaleCard() throws Exception {
         command("/esim");tap(choice(1,CHAT));profiles=new JSONArray().put(profiles.getJSONObject(0));tap(confirmation());
-        verify(adapter,never()).enable(eq(EID),anyString());verify(api).send(eq(CHAT),contains("Профиль больше не найден"),isNull());
+        verify(adapter,never()).enable(selectedCard(),anyString());verify(api).send(eq(CHAT),contains("Профиль больше не найден"),isNull());
     }
     @Test public void changedAdapterCannotUseOldSelection() throws Exception {
         command("/esim");when(adapter.card(anyString())).thenReturn(new JSONObject().put("eid","different"));tap(choice(1,CHAT));
-        verify(adapter,never()).enable(eq(EID),anyString());verify(api).send(eq(CHAT),contains("Адаптер изменился"),isNull());
+        verify(adapter,never()).enable(selectedCard(),anyString());verify(api).send(eq(CHAT),contains("Адаптер изменился"),isNull());
     }
     @Test public void expiredListAndRevokedControlCannotSwitch() throws Exception {
         command("/esim");String selection=choice(1,CHAT);
@@ -137,16 +150,16 @@ public class EsimProfilesTest {
         settings.put("profile_menu:"+CHAT,cache.toString());tap(selection);
         verify(api).send(eq(CHAT),contains("Обнови список профилей"),isNull());
         command("/esim");tap(choice(1,CHAT));settings.put("esim_control","false");tap(confirmation());
-        verify(adapter,never()).enable(eq(EID),anyString());verify(api).send(eq(CHAT),contains("Управление адаптером выключено"),isNull());
+        verify(adapter,never()).enable(selectedCard(),anyString());verify(api).send(eq(CHAT),contains("Управление адаптером выключено"),isNull());
     }
     @Test public void unconfirmedSwitchNeverClaimsSuccess() throws Exception {
-        doNothing().when(adapter).enable(eq(EID),anyString());command("/esim");tap(choice(1,CHAT));tap(confirmation());
+        doAnswer(i->new JSONArray(profiles.toString())).when(adapter).enable(selectedCard(),anyString());command("/esim");tap(choice(1,CHAT));tap(confirmation());
         verify(api,never()).send(anyLong(),contains("Активирован профиль"),any());
         verify(api).send(eq(CHAT),contains("активация не подтверждена"),isNull());
         assertEquals("true",settings.get("switching:0"));
     }
     @Test public void adapterFailureNeverClaimsSuccess() throws Exception {
-        doThrow(new UserError("Переключение не подтверждено")).when(adapter).enable(eq(EID),anyString());
+        doThrow(new UserError("Переключение не подтверждено")).when(adapter).enable(selectedCard(),anyString());
         command("/esim");tap(choice(1,CHAT));tap(confirmation());
         verify(api,never()).send(anyLong(),contains("Активирован профиль"),any());
         verify(api).send(eq(CHAT),contains("Переключение не подтверждено"),isNull());
@@ -185,7 +198,7 @@ public class EsimProfilesTest {
         verify(api).send(eq(CHAT),contains("QR-код получен"),notNull());
         when(adapter.download(eq(EID),anyString(),anyString())).thenAnswer(i->{add(5,false);return new JSONObject().put("iccid",iccid(5)).put("eid",EID);});
         tap(confirmation());verify(adapter).download(EID,"LPA:1$example.com$sample-token","");
-        assertEquals(5,profiles.length());verify(adapter).enable(EID,iccid(5));
+        assertEquals(5,profiles.length());verify(adapter).enable(selectedCard(),eq(iccid(5)));
     }
     @Test public void unavailableMemoryDoesNotHideProfiles() throws Exception {
         when(adapter.info(any())).thenThrow(new UserError("No info"));command("/esim");
@@ -280,7 +293,7 @@ public class EsimProfilesTest {
         when(adapter.download(eq(EID),eq("LPA:1$example.com$second"),anyString())).thenAnswer(i->{add(3,false);return new JSONObject().put("iccid",iccid(3)).put("eid",EID);});
         command("/add");command("+79992222222");command("LPA:1$example.com$second");tap(confirmation());tap(failed);
         verify(adapter,times(1)).download(EID,"LPA:1$example.com$first","");verify(adapter,times(1)).download(EID,"LPA:1$example.com$second","");
-        verify(adapter).enable(EID,iccid(3));assertEquals("false",settings.get("switching:0"));assertEquals("",settings.get("esim_last_error"));
+        verify(adapter).enable(selectedCard(),eq(iccid(3)));assertEquals("false",settings.get("switching:0"));assertEquals("",settings.get("esim_last_error"));
         verify(api).send(eq(CHAT),contains("Активирован профиль +79992222222"),notNull());
     }
     @Test public void installedProfileAfterLostResponseIsNotDownloadedAgainAutomatically() throws Exception {
@@ -288,7 +301,7 @@ public class EsimProfilesTest {
         command("/add");command("+79993333333");command("LPA:1$example.com$uncertain");String confirm=confirmation();tap(confirm);
         bot.reconcile();command("/esim");tap(confirm);
         assertEquals(3,profiles.length());verify(adapter,times(1)).download(EID,"LPA:1$example.com$uncertain","");
-        verify(adapter,never()).enable(eq(EID),anyString());verify(store,never()).number(anyString(),anyString());
+        verify(adapter,never()).enable(selectedCard(),anyString());verify(store,never()).number(anyString(),anyString());
         verify(api).send(eq(CHAT),contains("Всего: 3"),notNull());
     }
 }

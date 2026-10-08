@@ -15,6 +15,7 @@ import im.angry.openeuicc.core.EuiccChannel
 import im.angry.openeuicc.core.EuiccChannelManager
 import im.angry.openeuicc.service.EuiccChannelManagerService
 import im.angry.openeuicc.service.EuiccChannelManagerService.Companion.waitDone
+import im.angry.openeuicc.service.IdleServiceSession
 import im.angry.openeuicc.util.LPAString
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.toList
@@ -22,6 +23,7 @@ import net.typeblog.lpac_jni.LocalProfileInfo
 import org.json.JSONArray
 import org.json.JSONObject
 import ru.smsbridge.app.EsimErrors
+import ru.smsbridge.app.AdapterProgress
 
 /** Bound service owns APDU channels. This non-exported provider accepts only this app UID. */
 class GatewayProvider : ContentProvider() {
@@ -29,6 +31,22 @@ class GatewayProvider : ContentProvider() {
         private val SE = EuiccChannel.SecureElementId.DEFAULT
     }
     override fun onCreate() = true
+    private val session by lazy { IdleServiceSession(CoroutineScope(SupervisorJob() + Dispatchers.IO),30_000L,::connectService) }
+    private suspend fun connectService(): IdleServiceSession.Handle<EuiccChannelManagerService> {
+        val ready = CompletableDeferred<EuiccChannelManagerService>()
+        val valid = java.util.concurrent.atomic.AtomicBoolean(true)
+        val connection = object: ServiceConnection {
+            override fun onServiceConnected(name: ComponentName, binder: IBinder) { ready.complete((binder as EuiccChannelManagerService.LocalBinder).service) }
+            override fun onServiceDisconnected(name: ComponentName) { valid.set(false);ready.cancel() }
+            override fun onNullBinding(name: ComponentName) { valid.set(false);ready.cancel() }
+            override fun onBindingDied(name: ComponentName) { valid.set(false);ready.cancel() }
+        }
+        check(context!!.bindService(Intent(context,EuiccChannelManagerService::class.java),connection,Context.BIND_AUTO_CREATE))
+        try {
+            val service = withTimeout(20_000L) { ready.await() }
+            return IdleServiceSession.Handle(service,{valid.get()},{context!!.unbindService(connection)})
+        } catch(e: Throwable) { context!!.unbindService(connection);throw e }
+    }
     private fun authenticate() {
         if(Binder.getCallingUid() != android.os.Process.myUid())throw SecurityException("Internal provider only")
     }
@@ -38,6 +56,7 @@ class GatewayProvider : ContentProvider() {
     @Synchronized override fun query(uri: Uri, projection: Array<out String>?, selection: String?, selectionArgs: Array<out String>?, sortOrder: String?): Cursor {
         authenticate()
         val identity = Binder.clearCallingIdentity()
+        AdapterProgress.start("Подключение к адаптеру",uri.lastPathSegment == "enableProfile")
         try {
             val rows = runBlocking(Dispatchers.IO) {
                 if(context!!.checkSelfPermission(Manifest.permission.READ_PHONE_STATE) != PackageManager.PERMISSION_GRANTED)
@@ -54,25 +73,17 @@ class GatewayProvider : ContentProvider() {
                 app.appContainer.preferenceRepository.ignoreTLSCertificateFlow.updatePreference(false)
                 app.appContainer.preferenceRepository.verboseLoggingFlow.updatePreference(false)
                 if(action == "setPreference") return@runBlocking JSONArray().put(JSONObject().put("success",true))
-                val ready = CompletableDeferred<EuiccChannelManagerService>()
-                val connection = object: ServiceConnection {
-                    override fun onServiceConnected(name: ComponentName, binder: IBinder) {
-                        ready.complete((binder as EuiccChannelManagerService.LocalBinder).service)
-                    }
-                    override fun onServiceDisconnected(name: ComponentName) { ready.cancel() }
-                    override fun onNullBinding(name: ComponentName) { ready.cancel() }
-                }
-                check(context!!.bindService(Intent(context,EuiccChannelManagerService::class.java),connection,Context.BIND_AUTO_CREATE))
                 val wake = (context!!.getSystemService(Context.POWER_SERVICE) as PowerManager)
                     .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK,"smsbridge:adapter")
                 try {
                     wake.acquire(600000L)
-                    val service = withTimeout(20000L) { ready.await() }
-                    withTimeout(10000L) { service.waitForForegroundTask() }
-                    handle(service, uri, action!!)
+                    session.use { service ->
+                        withTimeout(10000L) { service.waitForForegroundTask() }
+                        AdapterProgress.phase("Чтение карты")
+                        handle(service, uri, action!!)
+                    }
                 } finally {
                     if(wake.isHeld)wake.release()
-                    context!!.unbindService(connection)
                 }
             }
             return MatrixCursor(arrayOf("rows")).apply { addRow(arrayOf(rows.toString())) }
@@ -89,7 +100,7 @@ class GatewayProvider : ContentProvider() {
                 JSONArray().put(EsimErrors.download(e.lpaErrorReason,e.lastHttpResponse?.rcode ?: 0,e.lastHttpResponse?.data,e.lastHttpException,e.lastApduResponse))
                 else error(code)
             return MatrixCursor(arrayOf("rows")).apply { addRow(arrayOf(rows.toString())) }
-        } finally { Binder.restoreCallingIdentity(identity) }
+        } finally { AdapterProgress.finish();Binder.restoreCallingIdentity(identity) }
     }
     private suspend fun handle(service: EuiccChannelManagerService, uri: Uri, action: String): JSONArray {
         val manager = service.euiccChannelManager
@@ -139,10 +150,14 @@ class GatewayProvider : ContentProvider() {
         if(action == "enableProfile") {
             val iccid = requireNotNull(uri.getQueryParameter("iccid"))
             require(iccid.matches(Regex("[0-9]{10,24}")))
-            service.launchProfileSwitchTask(slot,port,SE,iccid,true,20000L,expectedEid)
+            service.launchProfileSwitchTask(slot,port,SE,iccid,true,20000L,expectedEid,AdapterProgress::phase)
                 .waitDone()?.let { throw it }
-            val active = manager.withEuiccChannel(slot,port,SE) { c -> check(c.lpa.eID == expectedEid);c.lpa.profiles.any { it.iccid == iccid && it.state == LocalProfileInfo.State.Enabled } }
-            return JSONArray().put(JSONObject().put("success",active))
+            AdapterProgress.phase("Проверка активного профиля")
+            val profiles = manager.withEuiccChannel(slot,port,SE) { c -> check(c.lpa.eID == expectedEid);c.lpa.profiles }
+            val active = profiles.count { it.state == LocalProfileInfo.State.Enabled } == 1 &&
+                profiles.any { it.iccid == iccid && it.state == LocalProfileInfo.State.Enabled }
+            return JSONArray().put(JSONObject().put("success",active).put("eid",expectedEid).put("slot",slot).put("port",port)
+                .put("profiles",JSONArray(profiles.map { profile(it) })))
         }
         if(action == "deleteProfile") {
             val eid = requireNotNull(uri.getQueryParameter("expectedEid"))
