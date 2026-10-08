@@ -212,7 +212,7 @@ public class BotSetupTest {
     }
     @Test public void esimInstalledButInactiveDoesNotClaimSuccess() throws Exception {
         LpaClient adapter=beginEsim("LPA:1$smdp.example$MATCH");
-        when(adapter.profiles(any(JSONObject.class))).thenReturn(new JSONArray().put(new JSONObject().put("iccid","8900000000000000001").put("enabled",false)));
+        when(adapter.enable(selectedCard(),anyString())).thenReturn(new JSONArray().put(new JSONObject().put("iccid","8900000000000000001").put("enabled",false)));
         confirmEsim();verify(api,never()).send(anyLong(),contains("Активирован профиль"),any());
         verify(api).send(eq(456L),contains("активация не подтверждена"),isNull());
     }

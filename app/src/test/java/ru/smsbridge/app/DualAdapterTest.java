@@ -96,6 +96,7 @@ public class DualAdapterTest {
         profiles.get(B).getJSONObject(0).put("enabled",true);
         when(lpa.profiles(argThat(c->c!=null&&c.optString("eid").equals(A)))).thenThrow(new UserError("Нет ответа первой карты"));
         doCallRealMethod().when(lpa).refresh(s);doCallRealMethod().when(lpa).refresh(eq(s),any(JSONObject.class));
+        doCallRealMethod().when(lpa).refresh(eq(s),any(JSONObject.class),any(JSONArray.class));
         lpa.refresh(s);verify(s).active(1,Rules.profileKey(B,ICCID));verify(s,never()).clearActive();assertTrue(values.get("esim_refresh_error").contains("Слот 1"));
     }
     @Test public void unavailablePendingDeletionDoesNotHideRecoveryOnSecondCard() throws Exception {
