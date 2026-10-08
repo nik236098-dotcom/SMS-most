@@ -80,6 +80,11 @@ public class BotConcurrencyTest {
         send("/start",null,456);verify(api).send(eq(456L),contains("SMS Мост"),notNull());
         send("/esim",null,456);verify(api).send(eq(456L),contains("Новый запрос не запущен"),isNull());complete();
     }
+    @Test public void blockedAndroidSimListDoesNotBlockBotCommands() throws Exception {
+        bot=new Bot(s,lpa,()->{block();return new JSONArray();},tasks);
+        send("/profiles",null,456);awaitBlocked();send("/start",null,789);
+        verify(api).send(eq(789L),contains("SMS Мост"),notNull());complete();
+    }
     @Test public void blockedDownloadDoesNotBlockCommandsOrRepeatQr() throws Exception {
         draft("confirm_add");when(lpa.download(eq(EID),anyString(),anyString())).thenAnswer(i->{block();return new JSONObject().put("eid",EID).put("iccid",ICCID);});
         when(lpa.profiles(any(JSONObject.class))).thenReturn(new JSONArray().put(new JSONObject().put("iccid",ICCID).put("enabled",true)));

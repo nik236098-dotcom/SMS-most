@@ -36,17 +36,18 @@ final class Bot {
         poll(new Telegram(s.get("token","")),timeout);
     }
     void poll(Telegram t,int timeout) throws Exception {
-        if(!s.running())return;
+        if(!s.running()||t.closed())return;
         long wait=s.telegramRemaining();if(wait>0){java.util.concurrent.TimeUnit.MILLISECONDS.sleep(Math.min(1000,wait));return;}
         if(!POLLING.compareAndSet(false,true)){java.util.concurrent.TimeUnit.MILLISECONDS.sleep(300);return;}
-        String session=s.epoch();
         try {
+            String session=s.epoch();
             JSONArray updates=t.call("getUpdates",new JSONObject().put("offset",Long.parseLong(s.get("offset","0")))
                 .put("timeout",timeout).put("limit",50).put("allowed_updates",new JSONArray().put("message").put("callback_query"))).getJSONArray("result");
-            if(!java.util.Objects.equals(session,s.epoch()))return;
+            if(t.closed()||!s.running()||!java.util.Objects.equals(session,s.epoch()))return;
             s.put("bot_last_seen",""+System.currentTimeMillis());s.put("bot_error","");
             for(int i=0;i<updates.length() && s.running();i++) {
-                if(!java.util.Objects.equals(session,s.epoch()))return;
+                if(t.closed()||!java.util.Objects.equals(session,s.epoch()))return;
+                s.put("bot_loop_seen",""+System.currentTimeMillis());
                 JSONObject u=updates.getJSONObject(i);long id=u.getLong("update_id");
                 // Commit consumption before side effects. A crash must not replay a one-use download.
                 s.put("offset",""+(id+1));
@@ -61,6 +62,7 @@ final class Bot {
         finally {POLLING.set(false);}
     }
     private boolean dispatch(Telegram t,JSONObject u,long operation) throws Exception {
+        if(t.closed())return false;
         if(tasks==null){handle(t,u);return false;}
         JSONObject cb=u.optJSONObject("callback_query"),m=cb==null?u.optJSONObject("message"):cb.optJSONObject("message");
         JSONObject from=cb==null?(m==null?null:m.optJSONObject("from")):cb.optJSONObject("from");
@@ -72,16 +74,16 @@ final class Bot {
         String command=cb==null?m.optString("text","").trim():cb.optString("data");
         boolean menu=cb==null&&(command.equals("/start")||command.equals("/menu"));
         if(menu&&tasks.busy()){handler.menu(t,null);return false;}
-        boolean immediate=cb==null?java.util.Arrays.asList("/start","/menu","/status","/queue","/retry","/calls","/profiles").contains(command):
-            java.util.Arrays.asList("menu","status","last","queue","retry","calls","test","profiles").contains(command);
+        boolean immediate=cb==null?java.util.Arrays.asList("/start","/menu","/status","/queue","/retry","/calls").contains(command):
+            java.util.Arrays.asList("menu","status","last","queue","retry","calls","test").contains(command);
         if(immediate){handler.handle(t,u);return false;}
         String session=s.epoch();
         if(cb!=null)try{t.call("answerCallbackQuery",new JSONObject().put("callback_query_id",cb.getString("id")));}catch(Exception ignored){}
         boolean submitted=tasks.submit(()->{
             s.put("esim_task_started",""+System.currentTimeMillis());s.put("esim_task_state","running");
-            s.put("esim_task_label",command.startsWith("confirm:")?"Подтверждённая операция с профилем":"Запрос к 9eSIM");
+            s.put("esim_task_label",command.startsWith("confirm:")?"Подтверждённая операция с профилем":command.equals("/profiles")||command.equals("profiles")?"Чтение SIM-карт Android":"Запрос к 9eSIM");
         },()->{
-            try {if(s.running()&&session.equals(s.epoch())&&s.chats().contains(target))handler.handle(t,u);}
+            try {if(!t.closed()&&s.running()&&session.equals(s.epoch())&&s.chats().contains(target))handler.handle(t,u);}
             catch(Exception e){
                 s.put("error",Telegram.safe(e));
                 if(e instanceof Telegram.ApiError&&((Telegram.ApiError)e).code==429)s.telegramWait(Math.max(1,((Telegram.ApiError)e).retry));
@@ -93,10 +95,10 @@ final class Bot {
         },()->{
             if(s.running()&&session.equals(s.epoch())&&s.chats().contains(target))try{
                 s.enqueueNotice("adapter-slow:"+session+":"+operation,target,
-                    "9eSIM пока не завершил операцию. Результат ещё не подтверждён. Повторно удаление или установку не запускай. Бот продолжает отвечать: /start и /status.");
+                    "Операция с SIM пока не завершена. Результат ещё не подтверждён. Повторно удаление или установку не запускай. Бот продолжает отвечать: /start и /status.");
             }catch(Exception ignored){}
         },()->s.put("esim_task_state","idle"));
-        if(!submitted)t.send(target,"9eSIM ещё занят предыдущей операцией. Новый запрос не запущен. Статус: /status. Меню и пересылка SMS продолжают работать.",null);
+        if(!submitted)t.send(target,"Предыдущая операция с SIM ещё выполняется. Новый запрос не запущен. Статус: /status. Меню и пересылка SMS продолжают работать.",null);
         return submitted;
     }
     void reconcileAsync() {
@@ -471,7 +473,7 @@ final class Bot {
         }
         show(t,m,text.toString(),keyboard(button("Повторить отправку","retry"),button("Обновить","queue"),button("Назад","menu")));
     }
-    private String status() {String error=s.get("esim_last_error","");return "Телефон на связи\n"+SmsDiagnostics.report(s)+"\n\n"+CallDiagnostics.report(s)+"\nОтправлено сегодня: "+s.today()+"\nВ очереди: "+s.pending()+"\n"+s.get("device_status","")+"\n"+adapterStatus(s)+(error.isEmpty()?"":"\n\nПоследняя ошибка загрузки eSIM:\n"+error);}
+    private String status() {String error=s.get("esim_last_error","");return "Телефон на связи\n"+BotHealth.details(s)+"\n"+SmsDiagnostics.report(s)+"\n\n"+CallDiagnostics.report(s)+"\nОтправлено сегодня: "+s.today()+"\nВ очереди: "+s.pending()+"\n"+s.get("device_status","")+"\n"+adapterStatus(s)+(error.isEmpty()?"":"\n\nПоследняя ошибка загрузки eSIM:\n"+error);}
     static String adapterStatus(Store s) {
         String state=s.get("esim_task_state","idle"),result=s.get("esim_last_result","");
         String text="9eSIM: "+(state.equals("running")?s.get("esim_task_label","операция выполняется"):state.equals("interrupted")?"результат предыдущей операции неизвестен":"нет текущей операции");

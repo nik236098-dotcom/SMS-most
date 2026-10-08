@@ -87,6 +87,24 @@ public class BotSetupTest {
     @Test public void stoppedBotDoesNotPoll() throws Exception {
         when(s.running()).thenReturn(false);bot.poll(api,0);verifyNoInteractions(api);
     }
+    @Test public void transientSettingsFailureCannotPermanentlyLockCommandReception() throws Exception {
+        owner=456;updates(message("/start",456,"private"));
+        when(s.epoch()).thenThrow(new IllegalStateException("temporary keystore failure")).thenReturn("test-session");
+        assertThrows(IllegalStateException.class,()->bot.poll(api,0));
+        bot.poll(api,0);verify(api).send(eq(456L),contains("SMS Мост"),notNull());
+        verify(api,times(1)).call(eq("getUpdates"),any());
+    }
+    @Test public void stoppedTransportCannotProcessLateCommandResponse() throws Exception {
+        owner=456;updates(message("/start",456,"private"));when(api.closed()).thenReturn(false,true);
+        bot.poll(api,0);verify(s,never()).beginOperation(anyLong());verify(s,never()).put(eq("offset"),anyString());
+        verify(api,never()).send(anyLong(),anyString(),any());
+    }
+    @Test public void pollingNetworkFailureReleasesGateForFollowingRequest() throws Exception {
+        owner=456;when(api.call(eq("getUpdates"),any())).thenThrow(new java.net.SocketTimeoutException())
+            .thenReturn(new JSONObject().put("result",new JSONArray().put(message("/start",456,"private"))));
+        assertThrows(java.net.SocketTimeoutException.class,()->bot.poll(api,0));bot.poll(api,0);
+        verify(api).send(eq(456L),contains("SMS Мост"),notNull());
+    }
     @Test public void queueShowsOwnDeliveryFailureAndRetryButton() throws Exception {
         owner=456;when(s.pendingFor(456)).thenReturn(1);
         when(s.queued(456)).thenReturn(new JSONArray().put(new JSONObject().put("id",43).put("recipient","my number")

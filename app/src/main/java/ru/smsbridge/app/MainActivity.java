@@ -82,11 +82,14 @@ public final class MainActivity extends Activity {
         });
         stats=label(card(),"",20,true);smsDiagnostics=label(card(),"",14,false);error=label(root,"",14,false);error.setTextColor(Color.rgb(255,196,105));
         button(root,"Отправить тест в Telegram",true,()->{if(s.chat()==0){toast("Сначала отправь код боту со своего Telegram");return;}if(!s.running()){toast("Сначала запусти бота");return;}background(()->{
+            RelayService.start(this);
             Telegram t=new Telegram(s.get("token",""));int sent=0;String failure="";
             for(long target:s.chats())try{t.send(target,"✅ Телефон подключён. Это тест SMS Мост.\nПересылка SMS: "+(s.enabled()?"включена":"нет разрешения на SMS — открой настройки Android"),null);sent++;}catch(Exception e){failure=Telegram.safe(e);}
             if(!failure.isEmpty())s.put("error",failure+". Каждый получатель должен нажать «Начать» в боте.");
             return "Тест отправлен: "+sent+" из "+s.chats().size();
         },this::toast);});
+        button(root,"Восстановить связь с ботом",false,()->{if(!s.running()){toast("Сначала запусти бота");return;}
+            try{startForegroundService(new Intent(this,RelayService.class).setAction("RECONNECT"));toast("Переподключаем приём команд. Настройки сохранены.");}catch(Exception e){toast(Telegram.safe(e));}});
         button(root,"Мои SIM-карты",false,this::physical);
         button(root,"Входящие звонки",false,this::callSettings);
         button(root,"Настройки",false,this::settings);
@@ -94,13 +97,13 @@ public final class MainActivity extends Activity {
         label(root,"При работе отображается постоянное уведомление. После настройки приложение можно закрыть.",13,false);refresh();
     }
     private void refresh(){
-        boolean running=s.running();status.setText(running?"Бот запущен":"Бот остановлен");
+        boolean running=s.running();status.setText(BotHealth.summary(s));
         relayToggle.setText(launching?"Проверяем Telegram…":running?"Остановить бота":"Запустить бота");relayToggle.setEnabled(!launching);
         String username=s.get("bot_username","");
         connection.setText((username.isEmpty()?"Токен ещё не проверен":"Бот: @"+username)+"\n"+(s.chat()>0?"Получатель: "+s.get("chat_name",""):"Получатель пока не подключён"));
         setupLabel.setText(running&&s.chat()==0?"Код подключения: "+s.setupCode()+"\nОтправь эти 8 цифр боту со своего Telegram. Код действует 30 минут.":"");
         setupLabel.setVisibility(running&&s.chat()==0?View.VISIBLE:View.GONE);
-        long seen=Long.parseLong(s.get("bot_last_seen","0"));String api=seen==0?"Ожидается первый ответ Telegram":System.currentTimeMillis()-seen<60000?"Telegram отвечает ✓":"Давно нет ответа Telegram";
+        String api=BotHealth.details(s);
         stats.setText(api+"\nSMS: "+(s.enabled()?(s.chat()>0?"пересылка включена":"ожидают подключения получателя"):"нужно разрешение SMS или запуск бота")+"\nДоставок сегодня: "+s.today()+" · очередь: "+s.pending());
         smsDiagnostics.setText(SmsDiagnostics.report(s)+"\n\n"+CallDiagnostics.report(s)+"\n\n"+Bot.adapterStatus(s));
         error.setText(s.get("bot_error","")+ (s.get("bot_error","").isEmpty()?"":"\n")+s.get("error",""));
@@ -188,7 +191,7 @@ public final class MainActivity extends Activity {
         button(root,"Открыть управление 9eSIM",true,()->{try{startActivity(new Intent().setClassName(getPackageName(),"im.angry.openeuicc.ui.UnprivilegedMainActivity"));}catch(Exception e){toast("Управление картой доступно в объединённой сборке");}});
         label(root,"Поддерживаются два адаптера в двух SIM-слотах. В боте /esim → выбери карту. Добавление: /add → выбери адаптер → введи номер → отправь QR-код → подтверди. При одном адаптере выбор не требуется.",14,false);
         TextView cardsStatus=label(card(),"Нажми «Проверить адаптеры», чтобы увидеть слоты и карты.",15,false);
-        button(root,"Проверить адаптеры",false,()->background(()->{LpaClient l=new LpaClient(this);JSONArray cards=l.cards();s.rememberCards(cards);l.refresh(s);StringBuilder found=new StringBuilder("Найдено карт: ").append(cards.length());
+        button(root,"Проверить адаптеры",false,()->adapterBackground(()->{LpaClient l=new LpaClient(this);JSONArray cards=l.cards();s.rememberCards(cards);l.refresh(s);StringBuilder found=new StringBuilder("Найдено карт: ").append(cards.length());
             for(int i=0;i<cards.length();i++){JSONObject c=cards.getJSONObject(i);String eid=c.optString("eid");found.append("\nСлот ").append(c.getInt("slot")+1).append(c.optBoolean("unavailable")?" · недоступен":" · EID …"+eid.substring(Math.max(0,eid.length()-6)));}return found.toString();},cardsStatus::setText));
         button(root,"Назад",false,this::settings);
     }
@@ -211,6 +214,13 @@ public final class MainActivity extends Activity {
     private interface Task {String run() throws Exception;}
     private interface Done {void accept(String value);}
     private void background(Task task,Done done){worker.submit(()->{try{String value=task.run();handler.post(()->{if(alive)done.accept(value);});}catch(Exception e){String message=Telegram.safe(e);handler.post(()->{if(alive){s.put("error",message);toast(message);if(homeVisible)refresh();}});}});}
+    private void adapterBackground(Task task,Done done){
+        boolean accepted=AdapterTasks.shared().submit(()->{},()->{
+            try{String value=task.run();handler.post(()->{if(alive)done.accept(value);});}
+            catch(Exception e){String message=Telegram.safe(e);handler.post(()->{if(alive)toast(message);});}
+        },()->handler.post(()->{if(alive)toast("Адаптер пока не ответил. Проверка связи с Telegram доступна на главном экране.");}),()->{});
+        if(!accepted)toast("Адаптер занят. Дождись завершения текущей операции.");
+    }
     private void toast(String text){Toast.makeText(this,text,Toast.LENGTH_LONG).show();}
     @Override public void onBackPressed(){home();}
     @Override protected void onDestroy(){alive=false;handler.removeCallbacks(ticker);worker.shutdownNow();super.onDestroy();}

@@ -210,10 +210,13 @@ final class Store extends SQLiteOpenHelper {
     }
     synchronized JSONObject next() throws Exception {
         long now=System.currentTimeMillis();
+        for(int checked=0;checked<10;checked++) {
         try (Cursor c = getReadableDatabase().rawQuery("SELECT id,payload,part,attempts,next_try FROM outbox r WHERE state='pending' AND next_try<=? AND NOT EXISTS (SELECT 1 FROM delivery_wait w WHERE (w.route=r.route OR w.route='*') AND w.until_time>?) ORDER BY id LIMIT 1", new String[]{""+now,""+now})) {
             if (!c.moveToFirst() || c.getLong(4) > System.currentTimeMillis()) return null;
-            return new JSONObject(Crypto.open(c.getString(1))).put("id", c.getLong(0)).put("part", c.getInt(2)).put("attempts", c.getInt(3));
+            try{return new JSONObject(Crypto.open(c.getString(1))).put("id", c.getLong(0)).put("part", c.getInt(2)).put("attempts", c.getInt(3));}
+            catch(Exception e){failed(c.getLong(0),c.getInt(3),0,"Не удалось прочитать сохранённое сообщение. Оно сохранено; остальные отправляются.");}
         }
+        }return null;
     }
     synchronized void enqueueNotice(String fingerprint,long target,String text) throws Exception {
         if(!chats().contains(target))return;
@@ -250,7 +253,7 @@ final class Store extends SQLiteOpenHelper {
     synchronized JSONArray queued(long target) throws Exception {
         JSONArray out=new JSONArray();long wait=deliveryWait(target);
         try(Cursor c=getReadableDatabase().rawQuery("SELECT id,payload,error,next_try FROM outbox WHERE state='pending' AND route=? ORDER BY id LIMIT 10",new String[]{route(target)})) {
-            while(c.moveToNext())out.put(new JSONObject(Crypto.open(c.getString(1))).put("id",c.getLong(0)).put("error",c.getString(2)).put("next_try",Math.max(wait,c.getLong(3))));
+            while(c.moveToNext())out.put(historyPayload(c.getString(1)).put("id",c.getLong(0)).put("error",c.getString(2)).put("next_try",Math.max(wait,c.getLong(3))));
         }return out;
     }
     synchronized long deliveryWait(long target) {
@@ -275,7 +278,7 @@ final class Store extends SQLiteOpenHelper {
     synchronized JSONArray recent() throws Exception {
         JSONArray out=new JSONArray();
         try(Cursor c=getReadableDatabase().rawQuery("SELECT id,payload,state,error FROM outbox ORDER BY id DESC LIMIT 20",null)) {
-            while(c.moveToNext())out.put(new JSONObject(Crypto.open(c.getString(1))).put("id",c.getLong(0)).put("state",c.getString(2)).put("error",c.getString(3)));
+            while(c.moveToNext())out.put(historyPayload(c.getString(1)).put("id",c.getLong(0)).put("state",c.getString(2)).put("error",c.getString(3)));
         }return out;
     }
     synchronized JSONArray recent(long target) throws Exception {return recent(target,null);}
@@ -283,10 +286,15 @@ final class Store extends SQLiteOpenHelper {
         JSONArray out = new JSONArray();
         try (Cursor c = getReadableDatabase().rawQuery("SELECT id,payload,state,error FROM outbox WHERE route=? ORDER BY id DESC", new String[]{route(target)})) {
             while(out.length()<10 && c.moveToNext()) {
-                JSONObject p=new JSONObject(Crypto.open(c.getString(1)));
+                JSONObject p=historyPayload(c.getString(1));
                 if(kind==null||p.optString("kind","sms").equals(kind))out.put(p.put("id",c.getLong(0)).put("state",c.getString(2)).put("error",c.getString(3)));
             }
         } return out;
+    }
+    private JSONObject historyPayload(String encrypted) throws Exception {
+        try{return new JSONObject(Crypto.open(encrypted));}
+        catch(Exception e){return new JSONObject().put("kind","sms").put("recipient","Запись пока не читается")
+            .put("sender","Ошибка чтения").put("body","Не удалось прочитать сохранённое сообщение. Запись сохранена в очереди.");}
     }
     synchronized void retry() { getWritableDatabase().execSQL("UPDATE outbox SET next_try=0 WHERE state='pending'"); }
     synchronized void retry(long target) {

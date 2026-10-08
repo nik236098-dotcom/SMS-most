@@ -3,9 +3,11 @@ package ru.smsbridge.app;
 import org.json.JSONObject;
 import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
-import java.net.URL;
 import java.nio.charset.StandardCharsets;
-import javax.net.ssl.HttpsURLConnection;
+import java.io.InterruptedIOException;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
+import okhttp3.*;
 
 final class Telegram {
     static final class ApiError extends Exception {
@@ -34,26 +36,50 @@ final class Telegram {
         }
     }
     private final String token;
+    private static final OkHttpClient HTTP=new OkHttpClient.Builder()
+        .dns(BoundedDns.system())
+        .connectTimeout(12,TimeUnit.SECONDS).readTimeout(30,TimeUnit.SECONDS)
+        .writeTimeout(12,TimeUnit.SECONDS).callTimeout(45,TimeUnit.SECONDS)
+        .followRedirects(false).followSslRedirects(false).retryOnConnectionFailure(false).build();
+    private final OkHttpClient http;private final String endpoint;
+    private final ConcurrentHashMap<Call,String> active=new ConcurrentHashMap<>();
+    private volatile boolean closed;
     Telegram(String token) {
+        this(token,HTTP,"https://api.telegram.org/");
+    }
+    Telegram(String token,OkHttpClient http,String endpoint) {
         if (!token.matches("[0-9]{5,20}:[A-Za-z0-9_-]{20,}")) throw new IllegalArgumentException("Неверный формат токена бота");
-        this.token=token;
+        this.token=token;this.http=http;this.endpoint=endpoint;
+    }
+    boolean closed(){return closed;}
+    void close(){closed=true;for(Call call:active.keySet())call.cancel();}
+    void reconnectPolling(){for(java.util.Map.Entry<Call,String> e:active.entrySet())if(e.getValue().equals("getUpdates"))e.getKey().cancel();http.connectionPool().evictAll();}
+    private byte[] request(String path,String method,JSONObject payload,int max) throws Exception {
+        if(closed||Thread.currentThread().isInterrupted())throw new InterruptedIOException("Telegram request cancelled");
+        Request.Builder request=new Request.Builder().url(endpoint+path);
+        if(payload!=null)request.post(RequestBody.create(payload.toString().getBytes(StandardCharsets.UTF_8),MediaType.get("application/json; charset=utf-8")));
+        Call call=http.newCall(request.build());active.put(call,method);
+        if(closed){active.remove(call);call.cancel();throw new InterruptedIOException("Telegram request cancelled");}
+        try(Response response=call.execute()) {
+            if(closed)throw new InterruptedIOException("Telegram request cancelled");
+            if(response.body()==null)throw new ApiError(response.code(),0);
+            byte[] data=read(response.body().byteStream(),max);
+            if(response.code()!=200) {
+                JSONObject error;
+                try{error=new JSONObject(new String(data,StandardCharsets.UTF_8));}catch(Exception ignored){throw new ApiError(response.code(),0);}
+                JSONObject parameters=error.optJSONObject("parameters");
+                throw new ApiError(error.optInt("error_code",response.code()),parameters==null?0:parameters.optLong("retry_after"),error.optString("description"));
+            }
+            return data;
+        } finally {active.remove(call);}
     }
     JSONObject call(String method, JSONObject payload) throws Exception {
         if (!method.matches("[A-Za-z]+")) throw new IllegalArgumentException("Bad method");
-        HttpsURLConnection c=(HttpsURLConnection)new URL("https://api.telegram.org/bot"+token+"/"+method).openConnection();
-        c.setInstanceFollowRedirects(false); c.setConnectTimeout(12000); c.setReadTimeout(35000); c.setRequestMethod("POST"); c.setDoOutput(true);
-        c.setRequestProperty("Content-Type","application/json; charset=utf-8");
-        byte[] raw=payload.toString().getBytes(StandardCharsets.UTF_8); c.setFixedLengthStreamingMode(raw.length);
-        try {
-            try(java.io.OutputStream out=c.getOutputStream()) { out.write(raw); }
-            int status=c.getResponseCode(); InputStream in=status>=400?c.getErrorStream():c.getInputStream();
-            if(in==null) throw new ApiError(status,0);
-            JSONObject obj=new JSONObject(new String(read(in,3*1024*1024),StandardCharsets.UTF_8));
+            JSONObject obj=new JSONObject(new String(request("bot"+token+"/"+method,method,payload,3*1024*1024),StandardCharsets.UTF_8));
             if (!obj.optBoolean("ok")) {
                 JSONObject parameters=obj.optJSONObject("parameters");
-                throw new ApiError(obj.optInt("error_code",status),parameters==null?0:parameters.optLong("retry_after"),obj.optString("description"));
+                throw new ApiError(obj.optInt("error_code",500),parameters==null?0:parameters.optLong("retry_after"),obj.optString("description"));
             } return obj;
-        } finally { c.disconnect(); }
     }
     void send(long chat,String text,JSONObject keyboard) throws Exception {
         java.util.List<String> parts=Rules.chunks(text);
@@ -68,10 +94,7 @@ final class Telegram {
         if(f.optLong("file_size")>2*1024*1024) throw new IllegalArgumentException("Пришли QR-код картинкой размером до 2 МБ");
         String path=f.getString("file_path");
         if(!path.matches("[A-Za-z0-9_/.-]+")||path.contains("..")) throw new IllegalArgumentException("Неверный путь изображения");
-        HttpsURLConnection c=(HttpsURLConnection)new URL("https://api.telegram.org/file/bot"+token+"/"+path).openConnection();
-        c.setInstanceFollowRedirects(false);c.setConnectTimeout(12000);c.setReadTimeout(25000);
-        try { if(c.getResponseCode()!=200) throw new ApiError(c.getResponseCode(),0); return read(c.getInputStream(),2*1024*1024); }
-        finally { c.disconnect(); }
+        return request("file/bot"+token+"/"+path,"file",null,2*1024*1024);
     }
     static byte[] read(InputStream in,int max) throws Exception {
         try(InputStream stream=in; ByteArrayOutputStream out=new ByteArrayOutputStream()) {
@@ -84,6 +107,7 @@ final class Telegram {
         if(e instanceof ApiError || e instanceof IllegalArgumentException || e instanceof UserError) return e.getMessage();
         if(e instanceof java.net.UnknownHostException) return "Не удаётся найти сервер Telegram. Проверь DNS, Wi-Fi или VPN на Android.";
         if(e instanceof java.net.SocketTimeoutException || e instanceof java.net.ConnectException) return "Телефон не может подключиться к api.telegram.org. Наличие интернета не означает доступ к Telegram: проверь VPN или другую сеть на Android.";
+        if(e instanceof InterruptedIOException)return "Запрос Telegram прерван или превысил время ожидания. Соединение будет установлено заново.";
         if(e instanceof javax.net.ssl.SSLException) return "Ошибка защищённого соединения с Telegram. Проверь дату и время на Android и настройки VPN.";
         return "Операция не завершена. Проверь интернет и состояние приложения.";
     }
