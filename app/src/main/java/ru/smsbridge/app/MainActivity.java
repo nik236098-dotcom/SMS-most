@@ -142,7 +142,7 @@ public final class MainActivity extends Activity {
         try {JSONArray rows=s.recent();if(rows.length()==0)label(root,"Сообщений пока нет",17,false);
             for(int i=0;i<rows.length();i++){JSONObject p=rows.getJSONObject(i);LinearLayout c=card();label(c,p.optString("recipient"),19,true);
                 label(c,"Доставка в Telegram ID: "+p.optLong("chat_id",s.chat()),14,false);
-                if(p.optString("kind").equals("notice")){label(c,"Результат операции 9eSIM",16,true);label(c,p.optString("body"),15,false);}
+                if(p.optString("kind").equals("notice")||p.optString("kind").equals("bot_reply")){label(c,"Ответ бота / операция 9eSIM",16,true);label(c,p.optString("body"),15,false);}
                 else if(p.optString("kind").equals("call")){label(c,"📞 Входящий звонок",16,true);label(c,"Абонент: "+p.optString("sender"),16,false);}
                 else {label(c,"Сервис: "+Rules.service(p.optString("sender")),16,true);label(c,"Отправитель: "+p.optString("sender"),14,false);label(c,p.optString("body"),15,false);}
                 label(c,SmsDiagnostics.time(p.optString("received","0")),14,false);label(c,p.optString("state").equals("sent")?"✓ Доставлено":"В очереди · "+p.optString("error"),14,false);
