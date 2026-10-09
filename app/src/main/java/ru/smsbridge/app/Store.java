@@ -225,6 +225,15 @@ final class Store extends SQLiteOpenHelper {
         cv.put("created",System.currentTimeMillis());cv.put("route",route(target));
         getWritableDatabase().insertWithOnConflict("outbox",null,cv,SQLiteDatabase.CONFLICT_IGNORE);
     }
+    synchronized void enqueueReply(String fingerprint,long target,String method,JSONObject request) throws Exception {
+        if(!chats().contains(target))return;
+        BotReply.validate(method,request,target);
+        JSONObject p=new JSONObject().put("kind","bot_reply").put("method",method).put("request",new JSONObject(request.toString()))
+            .put("body",request.getString("text")).put("epoch",epoch()).put("chat_id",target).put("received",System.currentTimeMillis());
+        ContentValues cv=new ContentValues();cv.put("fingerprint",fingerprint+"|"+target);cv.put("payload",Crypto.seal(p.toString()));
+        cv.put("created",System.currentTimeMillis());cv.put("route",route(target));
+        getWritableDatabase().insertWithOnConflict("outbox",null,cv,SQLiteDatabase.CONFLICT_IGNORE);
+    }
     synchronized void progress(long id, int nextPart) {
         ContentValues cv = new ContentValues(); cv.put("part", nextPart); cv.put("attempts", 0); cv.put("next_try", 0);
         getWritableDatabase().update("outbox", cv, "id=?", new String[]{""+id});

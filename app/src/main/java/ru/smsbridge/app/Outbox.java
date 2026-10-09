@@ -24,6 +24,10 @@ final class Outbox {
                 if(!s.chats().contains(destination)){s.failed(id,0,15,"Получатель изменился: доставка остановлена");continue;}
                 if(!p.optString("epoch").equals(s.epoch())){s.failed(id,0,15,"Чат изменился: очередь нельзя перенаправить другому получателю");continue;}
                 try {
+                    if(p.optString("kind").equals("bot_reply")) {
+                        if(!s.running()||!epoch.equals(s.epoch())||!s.pending(id))return;
+                        BotReply.deliver(t,p,destination);s.delivered(id);s.pace(destination);continue;
+                    }
                     List<JSONObject> chunks=SmsText.messages(p,destination);int i=p.getInt("part");
                     if(i<chunks.size()) {
                         if(!s.running() || !epoch.equals(s.epoch()) || !s.pending(id))return;

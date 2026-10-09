@@ -106,4 +106,37 @@ public class OutboxTest {
         Telegram.ApiError e=new Telegram.ApiError(400,0,"private token 12345 and private SMS body");
         assertEquals("Telegram отклонил запрос (400)",e.getMessage());assertFalse(e.formatting);
     }
+    private JSONObject reply(String method) throws Exception {
+        JSONObject request=new JSONObject().put("chat_id",456).put("text","Profiles").put("message_id",22)
+            .put("reply_markup",new JSONObject().put("inline_keyboard",new org.json.JSONArray().put(new org.json.JSONArray().put(new JSONObject().put("text","Open").put("callback_data","adapter")))));
+        return new JSONObject().put("id",81).put("kind","bot_reply").put("epoch","session").put("chat_id",456).put("method",method).put("request",request).put("part",0);
+    }
+    @Test public void queuedMenuRetainsButtonsAndIsDeliveredBySender() throws Exception {
+        when(store.next()).thenReturn(reply("editMessageText"),(JSONObject)null);Outbox.drain(context,store,api);
+        verify(api).call(eq("editMessageText"),argThat(p->p.optLong("message_id")==22&&p.has("reply_markup")&&!p.optBoolean("protect_content")));
+        verify(store).delivered(81);verify(store).pace(456);
+    }
+    @Test public void deletedMenuMessageFallsBackToNewMessageWithButtons() throws Exception {
+        when(store.next()).thenReturn(reply("editMessageText"),(JSONObject)null);when(api.call(eq("editMessageText"),any())).thenThrow(new Telegram.ApiError(400,0,"message to edit not found"));
+        Outbox.drain(context,store,api);verify(api).call(eq("sendMessage"),argThat(p->!p.has("message_id")&&p.has("reply_markup")));verify(store).delivered(81);
+    }
+    @Test public void alreadyAppliedEditDoesNotSendDuplicateMenu() throws Exception {
+        when(store.next()).thenReturn(reply("editMessageText"),(JSONObject)null);when(api.call(eq("editMessageText"),any())).thenThrow(new Telegram.ApiError(400,0,"message is not modified"));
+        Outbox.drain(context,store,api);verify(api,never()).call(eq("sendMessage"),any());verify(store).delivered(81);
+    }
+    @Test public void failedReplyRemainsQueuedWithOriginalButtons() throws Exception {
+        JSONObject row=reply("sendMessage");when(store.next()).thenReturn(row,(JSONObject)null);when(api.call(eq("sendMessage"),any())).thenThrow(new SocketTimeoutException());
+        Outbox.drain(context,store,api);verify(store).failed(eq(81L),eq(0),eq(0L),anyString());verify(store,never()).delivered(81);
+        assertTrue(row.getJSONObject("request").has("reply_markup"));
+    }
+    @Test public void queuedReplyCannotRedirectOrCallAnotherTelegramMethod() throws Exception {
+        for(JSONObject bad:new JSONObject[]{reply("sendMessage").put("request",new JSONObject().put("chat_id",999).put("text","wrong")),reply("deleteMessage")}){
+            when(store.next()).thenReturn(bad,(JSONObject)null);Outbox.drain(context,store,api);
+        }
+        verifyNoInteractions(api);verify(store,never()).delivered(81);
+    }
+    @Test public void oldSessionReplyIsNeverSentToNewSession() throws Exception {
+        when(store.next()).thenReturn(reply("sendMessage").put("epoch","old"),(JSONObject)null);Outbox.drain(context,store,api);
+        verifyNoInteractions(api);verify(store,never()).delivered(81);
+    }
 }

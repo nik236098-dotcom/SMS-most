@@ -36,7 +36,11 @@ public class BotConcurrencyTest {
     @After public void finish() throws Exception {release.countDown();worker.shutdown();assertTrue(worker.awaitTermination(3,TimeUnit.SECONDS));}
     void block() throws Exception {entered.countDown();assertTrue("test release",release.await(3,TimeUnit.SECONDS));}
     void awaitBlocked() throws Exception {assertTrue("native call started",entered.await(2,TimeUnit.SECONDS));}
-    void complete() throws Exception {release.countDown();worker.submit(()->{}).get(2,TimeUnit.SECONDS);assertFalse(tasks.busy());}
+    void complete() throws Exception {
+        release.countDown();long until=System.nanoTime()+TimeUnit.SECONDS.toNanos(2);
+        do {worker.submit(()->{}).get(2,TimeUnit.SECONDS);}while(tasks.busy()&&System.nanoTime()<until);
+        assertFalse(tasks.busy());
+    }
     void draft(String stage) throws Exception {
         values.put("draft:456",new JSONObject().put("stage",stage).put("epoch","session").put("nonce","nonce")
             .put("expires",System.currentTimeMillis()+60000).put("eid",EID).put("iccid",ICCID).put("key",Rules.profileKey(EID,ICCID))
@@ -79,7 +83,10 @@ public class BotConcurrencyTest {
     @Test public void blockedBackgroundProfileReadDoesNotBlockCommands() throws Exception {
         doAnswer(i->{block();return null;}).when(lpa).refresh(s);bot.reconcileAsync();awaitBlocked();
         send("/start",null,456);verify(api).send(eq(456L),contains("SMS Мост"),notNull());
-        send("/esim",null,456);verify(api).send(eq(456L),contains("Новый запрос не запущен"),isNull());complete();
+        when(lpa.cards()).thenReturn(new JSONArray().put(new JSONObject().put("eid",EID).put("slot",0).put("port",0)));
+        send("/esim",null,456);verify(s).enqueueNotice(anyString(),eq(456L),contains("Запрос принят"));
+        verify(lpa,never()).cards();complete();verify(lpa).cards();
+        verify(s).enqueueReply(anyString(),eq(456L),eq("sendMessage"),argThat(p->p.optString("text").startsWith("Профили 9eSIM")));
     }
     @Test public void blockedAndroidSimListDoesNotBlockBotCommands() throws Exception {
         bot=new Bot(s,lpa,()->{block();return new JSONArray();},tasks);
@@ -89,8 +96,10 @@ public class BotConcurrencyTest {
     @Test public void blockedDownloadDoesNotBlockCommandsOrRepeatQr() throws Exception {
         draft("confirm_add");when(lpa.download(eq(EID),anyString(),anyString())).thenAnswer(i->{block();return new JSONObject().put("eid",EID).put("iccid",ICCID);});
         when(lpa.profiles(any(JSONObject.class))).thenReturn(new JSONArray().put(new JSONObject().put("iccid",ICCID).put("enabled",true)));
+        when(lpa.enable(selectedCard(),eq(ICCID))).thenReturn(new JSONArray().put(new JSONObject().put("iccid",ICCID).put("enabled",true)));
         send("","confirm:nonce",456);awaitBlocked();send("/start",null,456);send("","confirm:nonce",456);
         verify(api).send(eq(456L),contains("SMS Мост"),notNull());complete();verify(lpa,times(1)).download(eq(EID),anyString(),anyString());
+        assertTrue(values.get("esim_last_result").contains("Активирован профиль"));
     }
     @Test public void blockedSwitchDoesNotBlockCommands() throws Exception {
         draft("confirm_enable");doAnswer(i->{block();return new JSONArray().put(new JSONObject().put("iccid",ICCID).put("enabled",true));}).when(lpa).enable(selectedCard(),eq(ICCID));
@@ -105,8 +114,33 @@ public class BotConcurrencyTest {
         draft("confirm_enable");doAnswer(i->{return new JSONArray().put(new JSONObject().put("iccid",ICCID).put("enabled",true));}).when(lpa).enable(selectedCard(),eq(ICCID));
         doThrow(new java.net.SocketTimeoutException()).when(api).send(eq(456L),contains("Активирован профиль"),any());
         send("","confirm:nonce",456);worker.submit(()->{}).get(2,TimeUnit.SECONDS);
-        verify(s).enqueueNotice(startsWith("activation-result:"),eq(456L),contains("Активирован профиль"));
+        verify(s).enqueueReply(anyString(),eq(456L),eq("sendMessage"),argThat(p->p.optString("text").contains("Активирован профиль")&&p.has("reply_markup")));
+        verify(api,never()).send(eq(456L),contains("Активирован профиль"),any());assertFalse(tasks.busy());
         assertTrue(values.get("esim_last_result").contains("Активирован профиль"));assertEquals("false",values.get("switching:0"));
+    }
+    @Test public void blockedDeliveryAfterActivationCannotKeepAdapterBusy() throws Exception {
+        draft("confirm_enable");when(lpa.enable(selectedCard(),eq(ICCID))).thenReturn(new JSONArray().put(new JSONObject().put("iccid",ICCID).put("enabled",true)));
+        send("","confirm:nonce",456);complete();
+        org.mockito.ArgumentCaptor<JSONObject> replies=org.mockito.ArgumentCaptor.forClass(JSONObject.class);
+        verify(s,atLeastOnce()).enqueueReply(anyString(),eq(456L),anyString(),replies.capture());
+        JSONObject result=replies.getAllValues().stream().filter(p->p.optString("text").contains("Активирован профиль")).findFirst().get();
+        JSONObject row=new JSONObject().put("id",77).put("kind","bot_reply").put("method","sendMessage").put("request",result).put("chat_id",456).put("epoch","session").put("part",0);
+        android.content.Context context=mock(android.content.Context.class);android.os.PowerManager power=mock(android.os.PowerManager.class);
+        when(context.getSystemService(android.os.PowerManager.class)).thenReturn(power);when(power.newWakeLock(anyInt(),anyString())).thenReturn(mock(android.os.PowerManager.WakeLock.class));
+        when(s.pending(77)).thenReturn(true);when(s.next()).thenReturn(row,(JSONObject)null);
+        CountDownLatch sending=new CountDownLatch(1),finishSend=new CountDownLatch(1);ExecutorService delivery=Executors.newSingleThreadExecutor();
+        when(api.call(eq("sendMessage"),any())).thenAnswer(i->{sending.countDown();assertTrue(finishSend.await(3,TimeUnit.SECONDS));return new JSONObject();});
+        try {
+            Future<?> pending=delivery.submit(()->Outbox.drain(context,s,api));assertTrue(sending.await(2,TimeUnit.SECONDS));assertFalse(tasks.busy());
+            send("/profiles",null,456);complete();verify(s).endOperation(2);
+            verify(s).enqueueReply(anyString(),eq(456L),eq("sendMessage"),argThat(p->p.optString("text").startsWith("Мои SIM-карты")));
+            assertFalse(tasks.busy());finishSend.countDown();pending.get(2,TimeUnit.SECONDS);verify(s).delivered(77);
+        }finally{finishSend.countDown();delivery.shutdownNow();assertTrue(delivery.awaitTermination(2,TimeUnit.SECONDS));}
+    }
+    @Test public void requestQueuedBehindScanIsDiscardedWhenSessionStops() throws Exception {
+        doAnswer(i->{block();return null;}).when(lpa).refresh(s);bot.reconcileAsync();awaitBlocked();
+        send("/esim",null,456);verify(s).enqueueNotice(anyString(),eq(456L),contains("Запрос принят"));
+        when(s.running()).thenReturn(false);complete();verify(lpa,never()).cards();verify(s).endOperation(1);
     }
     @Test public void unauthorizedUpdateCannotOccupyAdapterWorker() throws Exception {
         send("/esim",null,999);assertFalse(tasks.busy());assertTrue(alarms.isEmpty());verifyNoInteractions(lpa);

@@ -11,13 +11,14 @@ import okhttp3.*;
 
 final class Telegram {
     static final class ApiError extends Exception {
-        final int code; final long retry; final boolean formatting;
+        final int code; final long retry; final boolean formatting,notModified;
         ApiError(int code, long retry) {
             this(code,retry,"");
         }
         ApiError(int code,long retry,String description) {
             super(message(code,description));
             this.code=code;this.retry=retry;this.formatting=code==400 && isFormatting(description);
+            this.notModified=code==400&&description.toLowerCase(java.util.Locale.ROOT).contains("message is not modified");
         }
         private static boolean isFormatting(String text) {
             String d=text.toLowerCase(java.util.Locale.ROOT);

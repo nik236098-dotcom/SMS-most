@@ -26,6 +26,7 @@ final class Bot {
     Bot(Store store,LpaClient adapter) {this(store,adapter,()->new JSONArray());}
     Bot(Store store,LpaClient adapter,NativeSims subscriptions) {this(store,adapter,subscriptions,null);}
     Bot(Store store,LpaClient adapter,NativeSims subscriptions,AdapterTasks taskRunner) {s=store;lpa=adapter;sims=subscriptions;tasks=taskRunner;}
+    private String replyPrefix;private int replySequence;
     private final java.util.Map<Long,Long> prompts=new java.util.LinkedHashMap<>();
     static JSONObject button(String text,String data) throws Exception {return new JSONObject().put("text",text).put("callback_data",data);}
     static JSONObject keyboard(JSONObject... buttons) throws Exception {
@@ -55,7 +56,7 @@ final class Bot {
                 boolean deferred=false;
                 try {deferred=dispatch(t,u,id);} catch(Exception e) {s.put("error",Telegram.safe(e));
                     if(e instanceof Telegram.ApiError && ((Telegram.ApiError)e).code==429){s.telegramWait(Math.max(1,((Telegram.ApiError)e).retry));break;}
-                    if(s.chat()>0)try {t.send(replyTo(),Telegram.safe(e),null);} catch(Exception ignored) {}}
+                    if(s.chat()>0)try {send(t,replyTo(),Telegram.safe(e),null);} catch(Exception ignored) {}}
                 finally {if(!deferred)s.endOperation(id);}
             }
         } catch(Telegram.ApiError e) {if(e.code==429)s.telegramWait(Math.max(1,e.retry));throw e;}
@@ -77,9 +78,9 @@ final class Bot {
         boolean immediate=cb==null?java.util.Arrays.asList("/start","/menu","/status","/queue","/retry","/calls").contains(command):
             java.util.Arrays.asList("menu","status","last","queue","retry","calls","test").contains(command);
         if(immediate){handler.handle(t,u);return false;}
-        String session=s.epoch();
+        String session=s.epoch();handler.replyPrefix="bot-reply:"+session+":"+operation+":";
         if(cb!=null)try{t.call("answerCallbackQuery",new JSONObject().put("callback_query_id",cb.getString("id")));}catch(Exception ignored){}
-        boolean submitted=tasks.submit(()->{
+        AdapterTasks.Submission submitted=tasks.submitUser(()->{
             s.put("esim_native_phase","");
             s.put("esim_task_started",""+System.currentTimeMillis());s.put("esim_task_state","running");
             s.put("esim_task_label",command.startsWith("confirm:")?"Подтверждённая операция с профилем":command.equals("/profiles")||command.equals("profiles")?"Чтение SIM-карт Android":"Запрос к 9eSIM");
@@ -92,20 +93,21 @@ final class Bot {
                     String message="Операция 9eSIM не завершена с подтверждением: "+Telegram.safe(e)+"\nЕсли менял профиль, проверь /esim перед повтором.";
                     s.put("esim_last_result",message);s.enqueueNotice("adapter-error:"+session+":"+operation,target,message);
                 }catch(Exception ignored){}
-            } finally {s.endOperation(operation);}
+            }
         },()->{
             if(s.running()&&session.equals(s.epoch())&&s.chats().contains(target))try{
                 s.enqueueNotice("adapter-slow:"+session+":"+operation,target,
                     "Операция с SIM пока не завершена. Результат ещё не подтверждён. Повторно удаление или установку не запускай. Бот продолжает отвечать: /start и /status.");
             }catch(Exception ignored){}
-        },()->s.put("esim_task_state","idle"));
-        if(!submitted)t.send(target,"Предыдущая операция с SIM ещё выполняется. Новый запрос не запущен. Статус: /status. Меню и пересылка SMS продолжают работать.",null);
-        return submitted;
+        },()->{try{s.put("esim_task_state","idle");}finally{s.endOperation(operation);}});
+        if(submitted==AdapterTasks.Submission.QUEUED)try{s.enqueueNotice("adapter-accepted:"+session+":"+operation,target,"Запрос принят: ожидает окончания фоновой проверки карты. Повторно нажимать кнопку не нужно.");}catch(Exception ignored){}
+        if(submitted==AdapterTasks.Submission.BUSY)send(t,target,"Сейчас занят обработчик SIM: "+s.get("esim_task_label","операция с картой")+". Новый запрос не запущен. Этап и время: /status.",null);
+        return submitted!=AdapterTasks.Submission.BUSY;
     }
     void reconcileAsync() {
         if(tasks==null)throw new IllegalStateException("Adapter worker missing");
         if(!s.running()||!s.get("esim_control","false").equals("true"))return;
-        tasks.submit(()->{s.put("esim_task_started",""+System.currentTimeMillis());s.put("esim_task_state","running");s.put("esim_task_label","Проверка активного профиля");},()->{
+        tasks.submitBackground(()->{s.put("esim_task_started",""+System.currentTimeMillis());s.put("esim_task_state","running");s.put("esim_task_label","Проверка активного профиля");},()->{
             try {reconcile();}catch(Exception e){s.clearActive();s.put("esim_refresh_error",Telegram.safe(e));}
         },()->s.put("esim_refresh_error","Адаптер долго не отвечает; Telegram продолжает работать"),()->s.put("esim_task_state","idle"));
     }
@@ -120,21 +122,21 @@ final class Bot {
             if(input.matches("[0-9]{8}")) {
                 currentChat=id;
                 if(s.claim(id,chat.optString("first_name","Получатель SMS"),input,m.optLong("date")*1000L)) {
-                    t.send(id,"✅ Этот Telegram подключён как получатель SMS.\nНа Android больше ничего подтверждать не нужно.",null);
+                    send(t,id,"✅ Этот Telegram подключён как получатель SMS.\nНа Android больше ничего подтверждать не нужно.",null);
                     menu(t,null);
-                } else t.send(id,"Код неверный, истёк или временно заблокирован после нескольких попыток. Посмотри код на главном экране SMS Мост и попробуй ещё раз через минуту.",null);
+                } else send(t,id,"Код неверный, истёк или временно заблокирован после нескольких попыток. Посмотри код на главном экране SMS Мост и попробуй ещё раз через минуту.",null);
             } else {
                 long now=System.currentTimeMillis();
                 if(now-prompts.getOrDefault(id,0L)<10000)return;
                 if(prompts.size()>=64)prompts.remove(prompts.keySet().iterator().next());prompts.put(id,now);
-                t.send(id,"Бот работает ✅\nОтправь сюда 8 цифр с главного экрана приложения SMS Мост на Android.\n\nОтправить код должен тот, кто будет получать SMS. Владельцу Android не нужно подключать свой Telegram.",null);
+                send(t,id,"Бот работает ✅\nОтправь сюда 8 цифр с главного экрана приложения SMS Мост на Android.\n\nОтправить код должен тот, кто будет получать SMS. Владельцу Android не нужно подключать свой Telegram.",null);
             }
             return;
         }
         if(from==null || !Rules.authorized(s.chats(),chat.getLong("id"),chat.optString("type"),from.optBoolean("is_bot")) || from.optLong("id")!=chat.getLong("id"))return;
         currentChat=chat.getLong("id");
         if(cb!=null) {
-            try {t.call("answerCallbackQuery",new JSONObject().put("callback_query_id",cb.getString("id")));}catch(Exception ignored){}
+            if(replyPrefix==null)try {t.call("answerCallbackQuery",new JSONObject().put("callback_query_id",cb.getString("id")));}catch(Exception ignored){}
             String data=cb.optString("data");
             if(data.equals("menu")){ menu(t,m);return; }
             if(data.equals("status")){ show(t,m,status(),keyboard(button("Назад","menu")));return; }
@@ -142,7 +144,7 @@ final class Bot {
             if(data.equals("queue")){queue(t,m,false);return;}
             if(data.equals("retry")){queue(t,m,true);return;}
             if(data.equals("calls")){recentCalls(t,m);return;}
-            if(data.equals("test")){t.send(replyTo(),"✅ Бот отвечает. Телефон: "+s.get("device_status","")+"\nПересылка SMS: "+(s.enabled()?"включена":"выключена — проверь разрешение SMS на Android"),null);return;}
+            if(data.equals("test")){send(t,replyTo(),"✅ Бот отвечает. Телефон: "+s.get("device_status","")+"\nПересылка SMS: "+(s.enabled()?"включена":"выключена — проверь разрешение SMS на Android"),null);return;}
             if(data.equals("profiles")){ profiles(t,m);return; }
             if(data.equals("adapter")){adapterProfiles(t,m);return;}
             if(data.startsWith("card:")){adapterProfiles(t,m,0,data.substring(5));return;}
@@ -160,7 +162,7 @@ final class Bot {
         String text=m.optString("text","").trim();
         if(text.equals("/start")||text.equals("/menu")){s.put(draftKey(),"{}");menu(t,null);return;}
         if(text.equals("/cancel")){s.put(draftKey(),"{}");menu(t,null);return;}
-        if(text.equals("/status")){t.send(replyTo(),status(),null);return;}
+        if(text.equals("/status")){send(t,replyTo(),status(),null);return;}
         if(text.equals("/queue")){queue(t,null,false);return;}
         if(text.equals("/retry")){queue(t,null,true);return;}
         if(text.equals("/calls")){recentCalls(t,null);return;}
@@ -170,20 +172,20 @@ final class Bot {
         JSONObject d=draft();String stage=d.optString("stage");
         if(stage.equals("phone")) {
             d.put("number",Rules.phone(text)).put("stage","qr");s.put(draftKey(),d.toString());
-            t.send(replyTo(),"Номер сохранён: "+d.getString("number")+"\nТеперь пришли QR-код картинкой или строку LPA:1$… от оператора.\nЕсли нужен PIN оператора, его можно добавить командой /pin 1234 перед подтверждением.",keyboard(button("Отмена","cancel")));return;
+            send(t,replyTo(),"Номер сохранён: "+d.getString("number")+"\nТеперь пришли QR-код картинкой или строку LPA:1$… от оператора.\nЕсли нужен PIN оператора, его можно добавить командой /pin 1234 перед подтверждением.",keyboard(button("Отмена","cancel")));return;
         }
         if(stage.equals("physical_phone")) {
             int id=d.getInt("sub");requireSim(id);String n=Rules.phone(text);
             s.number("physical:"+id,n);s.put(draftKey(),"{}");
-            t.send(replyTo(),"Номер SIM сохранён: "+n,null);profiles(t,null);return;
+            send(t,replyTo(),"Номер SIM сохранён: "+n,null);profiles(t,null);return;
         }
         if(stage.equals("rename_phone")) {
-            String n=Rules.phone(text);s.number(d.getString("key"),n);s.put(draftKey(),"{}");t.send(replyTo(),"Номер профиля сохранён: "+n,null);adapterProfiles(t,null);return;
+            String n=Rules.phone(text);s.number(d.getString("key"),n);s.put(draftKey(),"{}");send(t,replyTo(),"Номер профиля сохранён: "+n,null);adapterProfiles(t,null);return;
         }
         if(stage.equals("qr") || stage.equals("confirm_add")) {
             if(text.startsWith("/pin ")) {
                 String pin=text.substring(5).trim();if(!pin.matches("[A-Za-z0-9]{1,32}"))throw new UserError("Проверь PIN оператора");
-                d.put("pin",pin);s.put(draftKey(),d.toString());t.send(replyTo(),"PIN добавлен.",null);return;
+                d.put("pin",pin);s.put(draftKey(),d.toString());send(t,replyTo(),"PIN добавлен.",null);return;
             }
             String code=text;
             JSONArray photos=m.optJSONArray("photo");JSONObject document=m.optJSONObject("document");
@@ -191,7 +193,7 @@ final class Bot {
             else if(document!=null && document.optString("mime_type").startsWith("image/"))code=decode(t.file(document.getString("file_id")));
             if(!code.startsWith("LPA:1$") || code.length()>2048 || code.split("\\$",-1).length<3)throw new UserError("Не удалось прочитать код eSIM. Пришли QR-код чёткой картинкой или строку активации.");
             d.put("code",code).put("stage","confirm_add");s.put(draftKey(),d.toString());
-            t.send(replyTo(),"Добавление eSIM\nНомер: "+d.getString("number")+"\nQR-код получен.\nПосле загрузки сохраним номер за профилем и попробуем активировать его.",keyboard(button("Установить eSIM","confirm:"+d.getString("nonce")),button("Отмена","cancel")));return;
+            send(t,replyTo(),"Добавление eSIM\nНомер: "+d.getString("number")+"\nQR-код получен.\nПосле загрузки сохраним номер за профилем и попробуем активировать его.",keyboard(button("Установить eSIM","confirm:"+d.getString("nonce")),button("Отмена","cancel")));return;
         }
         menu(t,null);
     }
@@ -430,7 +432,7 @@ final class Bot {
             if(stage.equals("confirm_add"))s.put("last_install","{}");
             String result=number.equals("Номер не задан")?"🟢 Активирован профиль с ICCID …"+iccid.substring(Math.max(0,iccid.length()-6))+".\nНомер пока не задан. Его можно указать в профиле.":"🟢 Активирован профиль "+number+".\nВ новых SMS будет указан этот номер.";
             result+="\n"+cardLabel(card);s.put("esim_last_result",result);
-            try {t.send(replyTo(),result,keyboard(button("Профили 9eSIM","adapter")));}
+            try {send(t,replyTo(),result,keyboard(button("Профили 9eSIM","adapter")));}
             catch(Exception e){s.enqueueNotice("activation-result:"+s.epoch()+":"+d.getString("nonce"),replyTo(),result);if(e instanceof Telegram.ApiError&&((Telegram.ApiError)e).code==429)s.telegramWait(Math.max(1,((Telegram.ApiError)e).retry));}
         } finally {
             if(!refreshed) {s.clearActive(slot);s.put("error","eSIM: проверь состояние профилей после незавершённой операции");}
@@ -456,10 +458,20 @@ final class Bot {
         }catch(Exception e){failure=e;}
         if(failure!=null)s.put("esim_refresh_error",Telegram.safe(failure));
     }
+    private void send(Telegram t,long target,String text,JSONObject keyboard) throws Exception {
+        if(replyPrefix==null){t.send(target,text,keyboard);return;}
+        java.util.List<String> parts=Rules.chunks(text);
+        for(int i=0;i<parts.size();i++) {
+            JSONObject request=new JSONObject().put("chat_id",target).put("text",parts.get(i)).put("protect_content",false);
+            if(i==parts.size()-1&&keyboard!=null)request.put("reply_markup",keyboard);
+            s.enqueueReply(replyPrefix+(replySequence++),target,"sendMessage",request);
+        }
+    }
     private void show(Telegram t,JSONObject m,String text,JSONObject keyboard) throws Exception {
-        if(m==null){t.send(replyTo(),text,keyboard);return;}
+        if(m==null){send(t,replyTo(),text,keyboard);return;}
         JSONObject p=new JSONObject().put("chat_id",replyTo()).put("message_id",m.getLong("message_id")).put("text",text);
         p.put("reply_markup",keyboard==null?new JSONObject().put("inline_keyboard",new JSONArray()):keyboard);
+        if(replyPrefix!=null){s.enqueueReply(replyPrefix+(replySequence++),replyTo(),"editMessageText",p);return;}
         try {t.call("editMessageText",p);}catch(Telegram.ApiError e){if(e.code!=400)throw e;}
     }
     private void menu(Telegram t,JSONObject m) throws Exception {show(t,m,"SMS Мост\n"+status(),keyboard(button("Проверить связь","test"),button("Статус телефона","status"),button("Последние SMS","last"),button("Очередь отправки","queue"),button("Входящие звонки","calls"),button("Мои SIM-карты","profiles"),button("Профили 9eSIM","adapter")));}
@@ -471,7 +483,7 @@ final class Bot {
         for(int i=0;i<rows.length();i++) {
             JSONObject p=rows.getJSONObject(i);String error=p.optString("error");long next=p.optLong("next_try");
             text.append("\n#").append(p.optLong("id")).append(" · ").append(p.optString("recipient"))
-                .append("\n").append(p.optString("kind").equals("notice")?"Результат операции 9eSIM":p.optString("kind").equals("call")?"Входящий звонок":Rules.service(p.optString("sender")))
+                .append("\n").append((p.optString("kind").equals("notice")||p.optString("kind").equals("bot_reply"))?"Ответ бота / операция 9eSIM":p.optString("kind").equals("call")?"Входящий звонок":Rules.service(p.optString("sender")))
                 .append("\n").append(error.isEmpty()?"Ожидает отправки":error)
                 .append("\n").append(next>now?"Следующая попытка: "+SmsDiagnostics.time(""+next):"Готово к отправке").append("\n");
         }
