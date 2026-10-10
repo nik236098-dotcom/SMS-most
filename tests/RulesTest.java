@@ -8,6 +8,10 @@ public final class RulesTest {
     public static void main(String[] args) {
         check(Rules.phone("+7 (999) 123-45-67").equals("+79991234567"),"Phone normalization");
         check(Rules.phone("+84901234567").equals("+84901234567"),"International phone");
+        for(String p:new String[]{"+7-900-000-11-11","8 (900) 000-11-11","7 900 000 11 11","9000001111","+7\u00a0(900)\u202f000\u201111\u201111","＋７（９００）０００－１１－１１","+٧٩٠٠٠٠٠١١١١","tel:+7.900.000.11.11","\u200e+7 (900) 000—11—11","0079000001111"})
+            check(Rules.phone(p).equals("+79000001111"),"Flexible phone: "+p);
+        check(Rules.phone("00 44 (20) 7946-0958").equals("+442079460958"),"International 00 prefix");
+        check(Rules.phone("+8 490 123 45 67").equals("+84901234567"),"Explicit international prefix is not Russian trunk");
         check(Rules.telegramId(" 123456789 ")==123456789L,"Telegram ID");
         check(Rules.telegramId("7999123456")==7999123456L,"Large Telegram ID");
         check(Rules.telegramIds("123, 456; 123\n789").equals(java.util.Arrays.asList(123L,456L,789L)),"Multiple IDs and duplicate removal");
@@ -17,7 +21,7 @@ public final class RulesTest {
         check(!Rules.authorized(Rules.telegramIds("123,456"),456,"group",false),"Allowed ID in group denied");
         rejects(()->Rules.telegramIds("1,2,3,4,5,6,7,8,9,10,11"));
         for(String id:new String[]{"-100123","0","@username","+79991234567","abc","","4503599627370496"})rejects(()->Rules.telegramId(id));
-        for(String p:new String[]{"79991234567","+00000","+7","+1234567890123456","+7999abc","","+7999\n/start"})rejects(()->Rules.phone(p));
+        for(String p:new String[]{"+00000","+7","+1234567890123456","+7999abc","","+7999\n/start","+7+9000001111","+79000001111 доб. 42"})rejects(()->Rules.phone(p));
         String eid="89049032123456789012345678901234",icc="8901234567890123456";
         String a=Rules.profileKey(eid,icc);
         check(!a.equals(Rules.profileKey(eid,"8901234567890123457")),"Two profiles on one adapter must not share number key");

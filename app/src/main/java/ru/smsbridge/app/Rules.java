@@ -26,9 +26,30 @@ public final class Rules {
         StringBuilder out=new StringBuilder();for(long id:ids){if(out.length()>0)out.append(", ");out.append(id);}return out.toString();
     }
     public static String phone(String value) {
-        String p = value == null ? "" : value.replaceAll("[\\s()\\-]", "");
-        if (!p.matches("\\+[1-9][0-9]{6,14}")) throw new IllegalArgumentException("Введите номер с кодом страны, например +79991234567");
-        return p;
+        String input=java.text.Normalizer.normalize(value==null?"":value,java.text.Normalizer.Form.NFKC).trim();
+        if(input.regionMatches(true,0,"tel:",0,4))input=input.substring(4);
+        StringBuilder digits=new StringBuilder();boolean international=false;
+        for(int i=0;i<input.length();) {
+            int c=input.codePointAt(i);i+=Character.charCount(c);int digit=Character.digit(c,10);
+            if(digit>=0){digits.append((char)('0'+digit));continue;}
+            if(c=='+') {
+                if(international||digits.length()>0)throw new IllegalArgumentException("Введите один номер телефона.");
+                international=true;continue;
+            }
+            int type=Character.getType(c);
+            if(Character.isWhitespace(c)||Character.isSpaceChar(c)||type==Character.FORMAT||type==Character.DASH_PUNCTUATION
+                ||type==Character.START_PUNCTUATION||type==Character.END_PUNCTUATION||type==Character.CONNECTOR_PUNCTUATION
+                ||c=='.'||c=='/'||c=='\\'||c==0x2212)continue;
+            throw new IllegalArgumentException("Введите номер без букв и добавочного номера, например +7 (900) 000-11-11.");
+        }
+        String p=digits.toString();
+        if(!international&&p.startsWith("00")){p=p.substring(2);international=true;}
+        if(!international) {
+            if(p.length()==11&&p.startsWith("8"))p="7"+p.substring(1);
+            else if(p.length()==10)p="7"+p;
+        }
+        if(!p.matches("[1-9][0-9]{6,14}"))throw new IllegalArgumentException("Проверь номер телефона, например +7 (900) 000-11-11.");
+        return "+"+p;
     }
     public static String service(String sender) {
         if (sender == null || sender.isEmpty()) return "Неизвестный отправитель";

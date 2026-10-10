@@ -206,7 +206,7 @@ public final class MainActivity extends Activity {
                 }
                 label(root,"Слот "+(info.getSimSlotIndex()+1)+" · "+info.getDisplayName(),17,true);
                 EditText e=input("+79991234567",false);String current=s.number("physical:"+info.getSubscriptionId());if(!current.equals("Номер не задан"))e.setText(current);
-                button(root,"Сохранить номер слота "+(info.getSimSlotIndex()+1),true,()->{try{s.number("physical:"+info.getSubscriptionId(),e.getText().toString());toast("Номер сохранён");}catch(Exception ex){toast(Telegram.safe(ex));}});
+                button(root,"Сохранить номер слота "+(info.getSimSlotIndex()+1),true,()->{try{String number=Rules.phone(e.getText().toString());s.number("physical:"+info.getSubscriptionId(),number);e.setText(number);toast("Номер сохранён: "+number);}catch(Exception ex){toast(Telegram.safe(ex));}});
             }}catch(Exception e){label(root,"Не удалось прочитать SIM: проверь разрешение «Телефон» в настройках приложения.",16,false);}
         button(root,"Обновить SIM-карты",false,this::physical);button(root,"Назад",false,this::home);
     }

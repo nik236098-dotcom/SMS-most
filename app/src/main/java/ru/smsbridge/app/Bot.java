@@ -1,12 +1,6 @@
 package ru.smsbridge.app;
 
 import android.content.Context;
-import android.graphics.Bitmap;
-import android.graphics.BitmapFactory;
-import com.google.zxing.BinaryBitmap;
-import com.google.zxing.MultiFormatReader;
-import com.google.zxing.RGBLuminanceSource;
-import com.google.zxing.common.HybridBinarizer;
 import org.json.JSONArray;
 import org.json.JSONObject;
 import java.text.SimpleDateFormat;
@@ -189,8 +183,9 @@ final class Bot {
             }
             String code=text;
             JSONArray photos=m.optJSONArray("photo");JSONObject document=m.optJSONObject("document");
-            if(photos!=null && photos.length()>0)code=decode(t.file(photos.getJSONObject(photos.length()-1).getString("file_id")));
-            else if(document!=null && document.optString("mime_type").startsWith("image/"))code=decode(t.file(document.getString("file_id")));
+            if(photos!=null && photos.length()>0)code=QrImage.decode(t.file(photos.getJSONObject(photos.length()-1).getString("file_id")));
+            else if(document!=null)code=QrImage.decode(t.file(document.getString("file_id")));
+            code=code.trim();
             if(!code.startsWith("LPA:1$") || code.length()>2048 || code.split("\\$",-1).length<3)throw new UserError("Не удалось прочитать код eSIM. Пришли QR-код чёткой картинкой или строку активации.");
             d.put("code",code).put("stage","confirm_add");s.put(draftKey(),d.toString());
             send(t,replyTo(),"Добавление eSIM\nНомер: "+d.getString("number")+"\nQR-код получен.\nПосле загрузки сохраним номер за профилем и попробуем активировать его.",keyboard(button("Установить eSIM","confirm:"+d.getString("nonce")),button("Отмена","cancel")));return;
@@ -523,17 +518,5 @@ final class Bot {
     }
     static String format(JSONObject p) {
         return header(p)+p.optString("body")+"\n\n🕒 Получено: "+new SimpleDateFormat("dd.MM.yyyy HH:mm:ss",Locale.forLanguageTag("ru")).format(new Date(p.optLong("received")));
-    }
-    private String decode(byte[] raw) throws Exception {
-        BitmapFactory.Options options=new BitmapFactory.Options();options.inJustDecodeBounds=true;BitmapFactory.decodeByteArray(raw,0,raw.length,options);
-        if(options.outWidth<=0||options.outHeight<=0)throw new UserError("Это не изображение QR-кода");
-        options.inSampleSize=1;while(Math.max(options.outWidth,options.outHeight)/options.inSampleSize>2048)options.inSampleSize*=2;
-        options.inJustDecodeBounds=false;Bitmap bm=BitmapFactory.decodeByteArray(raw,0,raw.length,options);
-        if(bm==null)throw new UserError("Не удалось открыть изображение");
-        try {int w=bm.getWidth(),h=bm.getHeight();int[] pixels=new int[w*h];bm.getPixels(pixels,0,w,0,0,w,h);
-            java.util.Map<com.google.zxing.DecodeHintType,Object> hints=new java.util.EnumMap<>(com.google.zxing.DecodeHintType.class);hints.put(com.google.zxing.DecodeHintType.TRY_HARDER,true);
-            return new MultiFormatReader().decode(new BinaryBitmap(new HybridBinarizer(new RGBLuminanceSource(w,h,pixels))),hints).getText();
-        } catch(Exception e){throw new UserError("Не удалось распознать QR-код. Пришли чёткое изображение без лишнего фона.");}
-        finally {bm.recycle();}
     }
 }
