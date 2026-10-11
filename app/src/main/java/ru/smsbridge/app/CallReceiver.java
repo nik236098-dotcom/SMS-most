@@ -13,6 +13,7 @@ import java.util.List;
 public final class CallReceiver extends BroadcastReceiver {
     @Override public void onReceive(Context context,Intent intent) {
         if(intent==null||!TelephonyManager.ACTION_PHONE_STATE_CHANGED.equals(intent.getAction()))return;
+        if(BridgeApp.settingsUnreadable())return;
         Store store=BridgeApp.store();boolean queued=false;
         try {
             String state=intent.getStringExtra(TelephonyManager.EXTRA_STATE);

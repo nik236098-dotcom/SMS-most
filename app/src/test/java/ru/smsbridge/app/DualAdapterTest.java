@@ -45,14 +45,18 @@ public class DualAdapterTest {
     }
     void command(String text) throws Exception {send(text,null,456);}
     void tap(String data) throws Exception {send("",data,456);}
-    String select(long chat) throws Exception {return "select:"+new JSONObject(values.get("profile_menu:"+chat)).getString("nonce")+":0";}
+    String select(long chat) throws Exception {return select(chat,0);}
+    /** One combined list: index 0 is the profile on card A (slot 1), index 1 the one on card B. */
+    String select(long chat,int index) throws Exception {return "select:"+new JSONObject(values.get("profile_menu:"+chat)).getString("nonce")+":"+index;}
     String confirm() throws Exception {return "confirm:"+new JSONObject(values.get("draft:456")).getString("nonce");}
-    void pickSecond() throws Exception {command("/esim");tap("card:"+B);tap(select(456));}
-    @Test public void chooserDoesNotSilentlyPickFirstCard() throws Exception {
-        command("/esim");verify(lpa,never()).profiles(any(JSONObject.class));
-        verify(api).send(eq(456L),argThat(t->t.contains("слот 1")&&t.contains("слот 2")),argThat(k->k.toString().contains("card:"+A)&&k.toString().contains("card:"+B)));
-        tap("card:"+B);verify(lpa).profiles(argThat(c->c.optString("eid").equals(B)));
-        verify(api).call(eq("editMessageText"),argThat(p->p.optString("text").contains("+79992222222")&&!p.optString("text").contains("+79991111111")));
+    void pickSecond() throws Exception {command("/esim");tap(select(456,1));}
+    @Test public void oneListShowsBothAdaptersWithTheirOwnNumbers() throws Exception {
+        command("/esim");verify(lpa).profiles(argThat(c->c.optString("eid").equals(A)));verify(lpa).profiles(argThat(c->c.optString("eid").equals(B)));
+        verify(api).send(eq(456L),argThat(t->t.contains("Слот 1")&&t.contains("Слот 2")&&t.indexOf("+79991111111")<t.indexOf("+79992222222")&&t.indexOf("Слот 2")<t.indexOf("+79992222222")),
+            argThat(k->k.toString().contains(":0\"")&&k.toString().contains(":1\"")));
+        // Opening the list again uses the saved scan: no second round of card reads.
+        clearInvocations(lpa);tap("adapter");verify(lpa,never()).profiles(any(JSONObject.class));verify(lpa,never()).cards();
+        tap(select(456,1));verify(api).call(eq("editMessageText"),argThat(p->p.optString("text").contains("+79992222222")&&p.optString("text").contains("слот 2")));
     }
     @Test public void switchWithIdenticalIccidsTargetsOnlySelectedCard() throws Exception {
         pickSecond();clearInvocations(s);tap(confirm());
@@ -84,13 +88,13 @@ public class DualAdapterTest {
         assertEquals(0,s.pendingDeletes().length());
     }
     @Test public void oldProfileButtonCannotSelectProfileOnNewCard() throws Exception {
-        command("/esim");tap("card:"+A);String old=select(456);tap("card:"+B);tap(old);
+        command("/esim");String old=select(456);command("/esim");tap(old);
         verify(api).send(eq(456L),contains("Обнови список профилей"),isNull());verify(lpa,never()).enable(any(JSONObject.class),anyString());
     }
     @Test public void authorizedUsersKeepIndependentSelections() throws Exception {
-        command("/esim");tap("card:"+B);send("","card:"+A,789);
-        tap(select(456));tap(confirm());verify(lpa).enable(selected(B),eq(ICCID));
-        assertEquals(B,values.get("selected_adapter:456"));assertEquals(A,values.get("selected_adapter:789"));
+        command("/esim");tap(select(456,1));send("/esim",null,789);send("",select(789,0),789);
+        assertEquals(B,new JSONObject(values.get("draft:456")).getString("eid"));assertEquals(A,new JSONObject(values.get("draft:789")).getString("eid"));
+        tap(confirm());verify(lpa).enable(selected(B),eq(ICCID));verify(lpa,never()).enable(selected(A),anyString());
     }
     @Test public void unreadableFirstCardDoesNotClearSecondCardsActiveProfile() throws Exception {
         profiles.get(B).getJSONObject(0).put("enabled",true);

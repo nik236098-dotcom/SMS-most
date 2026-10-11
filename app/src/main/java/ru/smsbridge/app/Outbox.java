@@ -26,7 +26,8 @@ final class Outbox {
                 try {
                     if(p.optString("kind").equals("bot_reply")) {
                         if(!s.running()||!epoch.equals(s.epoch())||!s.pending(id))return;
-                        BotReply.deliver(t,p,destination);s.delivered(id);s.pace(destination);continue;
+                        // Replies are answers to the user's own tap: no extra one-second pause.
+                        BotReply.deliver(t,p,destination);s.delivered(id);continue;
                     }
                     List<JSONObject> chunks=SmsText.messages(p,destination);int i=p.getInt("part");
                     if(i<chunks.size()) {

@@ -27,6 +27,7 @@ final class AdapterTasks {
         this.worker=worker;this.timer=timer;this.warningMillis=warningMillis;
     }
     synchronized boolean busy(){return active!=null;}
+    synchronized boolean userBusy(){return active!=null&&!active.background;}
     boolean submit(Runnable accepted,Runnable work,Runnable slow,Runnable finished) {
         return submit(new Task(false,accepted,work,slow,finished),false)==Submission.STARTED;
     }

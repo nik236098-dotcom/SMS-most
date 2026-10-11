@@ -35,6 +35,16 @@ public class AdapterRoutingTest {
     @Test public void staleObservationDoesNotInventRecipient() throws Exception {
         when(row.getLong(1)).thenReturn(System.currentTimeMillis()-60000);assertTrue(s.recipient(1,11).contains("профиль не проверен"));
     }
+    @Test public void sameAndroidSubscriptionKeepsOldObservationValidWithoutPolling() throws Exception {
+        // Android keeps one subId per ICCID: while the SMS arrives on the subscription seen at the
+        // card read, the same profile is still active however old the read is.
+        when(row.getLong(1)).thenReturn(System.currentTimeMillis()-3600000);values.put("active_sub:1","11");
+        assertEquals("+79992222222",s.recipient(1,11));
+    }
+    @Test public void otherAndroidSubscriptionNeverReusesOldObservation() throws Exception {
+        when(row.getLong(1)).thenReturn(System.currentTimeMillis()-3600000);values.put("active_sub:1","11");
+        assertTrue(s.recipient(1,12).contains("профиль не проверен"));
+    }
     @Test public void ordinarySimAlongsideAdapterKeepsPhysicalNumber() throws Exception {
         s.rememberCards(new JSONArray().put(DualAdapterTest.card(DualAdapterTest.A,0)));when(s.number("physical:11")).thenReturn("+79994444444");
         assertFalse(s.managed(1));assertEquals("+79994444444",s.recipient(1,11));

@@ -114,7 +114,8 @@ public class OutboxTest {
     @Test public void queuedMenuRetainsButtonsAndIsDeliveredBySender() throws Exception {
         when(store.next()).thenReturn(reply("editMessageText"),(JSONObject)null);Outbox.drain(context,store,api);
         verify(api).call(eq("editMessageText"),argThat(p->p.optLong("message_id")==22&&p.has("reply_markup")&&!p.optBoolean("protect_content")));
-        verify(store).delivered(81);verify(store).pace(456);
+        // A reply answers the user's own tap; only SMS forwarding keeps the per-chat pacing.
+        verify(store).delivered(81);verify(store,never()).pace(456);
     }
     @Test public void deletedMenuMessageFallsBackToNewMessageWithButtons() throws Exception {
         when(store.next()).thenReturn(reply("editMessageText"),(JSONObject)null);when(api.call(eq("editMessageText"),any())).thenThrow(new Telegram.ApiError(400,0,"message to edit not found"));

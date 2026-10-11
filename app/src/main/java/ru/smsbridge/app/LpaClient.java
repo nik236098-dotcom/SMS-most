@@ -36,6 +36,7 @@ final class LpaClient {
                     code.equals("profile_not_found")?"Профиль больше не найден. Обнови /esim":
                     code.equals("profile_delete_failed")?"Удаление не подтверждено: профиль остался на карте. Обнови /esim и проверь состояние":
                     code.equals("adapter_busy_or_reconnecting")?"Адаптер занят или переподключается. Подожди и обнови список профилей":
+                    code.equals("adapter_not_responding")?"Адаптер не ответил вовремя. Операция чтения прервана, бот продолжает работать. Если повторяется — вытащи и вставь адаптер или перезагрузи телефон":
                     code.equals("adapter_start_failed")?"Не удалось запустить фоновую операцию 9eSIM. Попытка завершена с ошибкой. Проверь автозапуск и ограничения батареи SMS Моста на телефоне":
                     "Адаптер не выполнил операцию. Открой встроенное управление 9eSIM и проверь профили перед повтором.");
             }
@@ -71,13 +72,14 @@ final class LpaClient {
             try {if(c.optBoolean("unavailable"))throw new UserError("Карта недоступна");refresh(s,c);}
             catch(Exception e){s.clearActive(slot);errors.append("Слот ").append(slot+1).append(": ").append(Telegram.safe(e)).append("\n");}
         }
+        s.snapshotCards(list);
         s.put("esim_refresh_error",errors.toString().trim());
     }
     void refresh(Store s,JSONObject card) throws Exception {
         refresh(s,card,profiles(card));
     }
     void refresh(Store s,JSONObject card,JSONArray ps) throws Exception {
-        int slot=card.getInt("slot");
+        int slot=card.getInt("slot");s.snapshotCard(card,ps);
         String key=null;for(int i=0;i<ps.length();i++) {JSONObject p=ps.getJSONObject(i);if(p.optBoolean("enabled")) {
             if(key!=null) throw new UserError("Несколько активных профилей: требуется отдельная настройка");key=Rules.profileKey(card.getString("eid"),p.getString("iccid"));
         }}

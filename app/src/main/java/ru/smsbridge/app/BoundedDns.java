@@ -10,7 +10,7 @@ import okhttp3.Dns;
 final class BoundedDns implements Dns {
     private final Dns delegate;private final ExecutorService executor;private final long timeoutMillis;
     static BoundedDns system() {
-        ThreadPoolExecutor pool=new ThreadPoolExecutor(0,2,30,TimeUnit.SECONDS,new SynchronousQueue<>(),r->{Thread t=new Thread(r,"smsbridge-dns");t.setDaemon(true);return t;});
+        ThreadPoolExecutor pool=new ThreadPoolExecutor(0,4,30,TimeUnit.SECONDS,new SynchronousQueue<>(),r->{Thread t=new Thread(r,"smsbridge-dns");t.setDaemon(true);return t;});
         return new BoundedDns(Dns.SYSTEM,pool,8000);
     }
     BoundedDns(Dns delegate,ExecutorService executor,long timeoutMillis){this.delegate=delegate;this.executor=executor;this.timeoutMillis=timeoutMillis;}

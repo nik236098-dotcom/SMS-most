@@ -20,5 +20,11 @@ final class RecoveringTask implements AutoCloseable {
         },0,delayMillis,TimeUnit.MILLISECONDS);
         if(recovery)try{restarted.run();}catch(Exception ignored){}
     }
+    /** One extra run on the same serial worker, e.g. right after new work was queued. */
+    synchronized void soon(long delayMillis) {
+        if(closed)return;
+        try{worker.schedule(()->{try{step.run();}catch(Exception e){try{report.accept(e);}catch(Exception ignored){}}},Math.max(0,delayMillis),TimeUnit.MILLISECONDS);}
+        catch(RejectedExecutionException ignored){}
+    }
     @Override public synchronized void close(){closed=true;if(job!=null)job.cancel(true);worker.shutdownNow();}
 }

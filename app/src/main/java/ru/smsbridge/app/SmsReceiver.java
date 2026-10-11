@@ -14,6 +14,8 @@ import org.json.JSONObject;
 public final class SmsReceiver extends BroadcastReceiver {
     @Override public void onReceive(Context c,Intent intent) {
         if(intent==null || !Telephony.Sms.Intents.SMS_RECEIVED_ACTION.equals(intent.getAction()))return;
+        // Unreadable settings: nothing can be routed; never crash the app on every SMS.
+        if(BridgeApp.settingsUnreadable())return;
         Store s=BridgeApp.store();
         try {
             s.put("sms_last_broadcast",""+System.currentTimeMillis());

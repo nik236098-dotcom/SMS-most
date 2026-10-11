@@ -12,6 +12,11 @@ import java.util.List;
 /** Active subscriptions come from Android, independently of an adapter companion. */
 interface NativeSims {
     JSONArray list() throws Exception;
+    /** Same list, but never waits longer than a moment for Android's telephony service. */
+    static NativeSims bounded(NativeSims raw) {
+        if(raw==null||raw instanceof Bounded)return raw;return (Bounded)()->BoundedCall.run(raw::list,2500);
+    }
+    interface Bounded extends NativeSims {}
     static NativeSims on(Context c) {
         return () -> {
             if(c.checkSelfPermission(Manifest.permission.READ_PHONE_STATE)!=PackageManager.PERMISSION_GRANTED)

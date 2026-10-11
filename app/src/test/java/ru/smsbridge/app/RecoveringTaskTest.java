@@ -25,6 +25,12 @@ public class RecoveringTaskTest {
         task=new RecoveringTask(executor,()->{count.incrementAndGet();entered.countDown();release.await();},e->{},()->{},5);
         task.ensure();assertTrue(entered.await(2,TimeUnit.SECONDS));for(int i=0;i<100;i++)task.ensure();assertEquals(1,count.get());
     }
+    @Test public void extraRunUsesSameSerialWorkerAndStopsAfterClose() throws Exception {
+        AtomicInteger count=new AtomicInteger();CountDownLatch ran=new CountDownLatch(2);
+        task=new RecoveringTask(executor,()->{count.incrementAndGet();ran.countDown();},e->{},()->{},60000);
+        task.ensure();task.soon(0);assertTrue(ran.await(2,TimeUnit.SECONDS));
+        task.close();task.soon(0);assertTrue(executor.awaitTermination(2,TimeUnit.SECONDS));assertEquals(2,count.get());
+    }
     @Test public void explicitStopCannotBeUndoneBySupervisor() {
         AtomicInteger count=new AtomicInteger();task=new RecoveringTask(executor,count::incrementAndGet,e->{},()->{},5);
         task.close();task.ensure();assertEquals(0,count.get());

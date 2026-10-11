@@ -74,33 +74,35 @@ public class EsimProfilesTest {
     }
     @Test public void listShowsInstalledProfilesActiveStateNumbersAndIccid() throws Exception {
         numbers.put(Rules.profileKey(EID,iccid(1)),"+79991234567");command("/esim");
-        verify(api).send(eq(CHAT),argThat(t->t.contains("Всего: 2")&&t.contains("🟢 Активен: +79991234567")
-            &&t.contains("Line 2 — выключен")&&t.contains("Оператор: Operator 2")&&t.contains("ICCID: …000002")),
-            argThat(k->k.toString().contains("Обновить список")&&k.toString().contains("select:")));
+        verify(api).send(eq(CHAT),argThat(t->t.contains("всего 2")&&t.contains("🟢 Активен: +79991234567")
+            &&t.contains("⚪ 2. Line 2 · …000002 · Operator 2")&&!t.contains("⚪ 1.")),
+            argThat(k->k.toString().contains("esim:refresh")&&k.toString().contains("select:")));
     }
     @Test public void aliasAndMainButtonOpenProfiles() throws Exception {
-        command("/9esim");tap("adapter");assertTrue(lastEdit().getString("text").contains("Всего: 2"));
+        command("/9esim");tap("adapter");assertTrue(lastEdit().getString("text").contains("всего 2"));
     }
     @Test public void largeListHasBoundedPagesAndFreshRefresh() throws Exception {
         for(int i=3;i<=19;i++)add(i,false);command("/esim");
-        verify(api).send(eq(CHAT),argThat(t->t.length()<4096&&t.contains("Страница 1 из 3")&&!t.contains("Line 9 —")),
+        verify(api).send(eq(CHAT),argThat(t->t.length()<4096&&t.contains("Страница 1 из 3")&&t.contains("Line 8 ·")&&!t.contains("Line 9 ·")),
             argThat(k->k.toString().contains("adapter:1")));
         String stale=choice(0,CHAT);tap("adapter:2");
         JSONObject output=lastEdit();assertTrue(output.getString("text").contains("Line 19"));
         assertTrue(output.getString("text").contains("🟢 Активен:"));
-        assertFalse(output.getString("text").contains("Line 8 —"));
+        assertFalse(output.getString("text").contains("Line 8 ·"));
         JSONArray rows=output.getJSONObject("reply_markup").getJSONArray("inline_keyboard");
         for(int i=0;i<rows.length();i++)for(int j=0;j<rows.getJSONArray(i).length();j++)
             assertTrue(rows.getJSONArray(i).getJSONObject(j).getString("callback_data").getBytes(java.nio.charset.StandardCharsets.UTF_8).length<=64);
         tap(stale);verify(api).send(eq(CHAT),contains("Обнови список профилей"),isNull());
         verify(adapter,never()).enable(selectedCard(),anyString());
-        profiles=new JSONArray();tap("adapter:2");assertTrue(lastEdit().getString("text").contains("пока нет профилей"));
+        // Page navigation uses the saved scan; «Обновить» reads the card again.
+        profiles=new JSONArray();tap("adapter:2");assertTrue(lastEdit().getString("text").contains("Line 19"));
+        tap("esim:refresh:2");assertTrue(lastEdit().getString("text").contains("пока нет профилей"));
     }
     @Test public void switchUsesExactIccidAfterListOrderChanges() throws Exception {
         numbers.put(Rules.profileKey(EID,iccid(2)),"+79992222222");command("/esim");String selected=choice(1,CHAT);
         profiles=new JSONArray().put(profiles.getJSONObject(1)).put(profiles.getJSONObject(0));tap(selected);
         assertTrue(lastEdit().getString("text").contains(iccid(2)));tap(confirmation());
-        verify(adapter).enable(selectedCard(),eq(iccid(2)));verify(adapter).refresh(eq(store),any(JSONObject.class),any(JSONArray.class));
+        verify(adapter).enable(selectedCard(),eq(iccid(2)));verify(adapter).refresh(eq(store),any(JSONObject.class),argThat(ps->ps.length()==2&&ps.getJSONObject(0).getString("iccid").equals(iccid(2))));
         verify(api).send(eq(CHAT),contains("Активирован профиль +79992222222"),notNull());
         assertEquals("false",settings.get("switching:0"));
     }
@@ -141,7 +143,7 @@ public class EsimProfilesTest {
         verify(adapter,never()).enable(selectedCard(),anyString());verify(api).send(eq(CHAT),contains("Профиль больше не найден"),isNull());
     }
     @Test public void changedAdapterCannotUseOldSelection() throws Exception {
-        command("/esim");when(adapter.card(anyString())).thenReturn(new JSONObject().put("eid","different"));tap(choice(1,CHAT));
+        command("/esim");when(adapter.card(anyString())).thenReturn(new JSONObject().put("eid","different"));tap(choice(1,CHAT));tap(confirmation());
         verify(adapter,never()).enable(selectedCard(),anyString());verify(api).send(eq(CHAT),contains("Адаптер изменился"),isNull());
     }
     @Test public void expiredListAndRevokedControlCannotSwitch() throws Exception {
@@ -168,6 +170,7 @@ public class EsimProfilesTest {
         command("/esim");tap(choice(1,CHAT));tap("rename");command("+79993333333");
         verify(store).number(Rules.profileKey(EID,iccid(2)),"+79993333333");
         verify(api).send(eq(CHAT),argThat(t->t.startsWith("Профили 9eSIM")&&t.contains("+79993333333")),notNull());
+        verify(adapter,times(1)).profiles(any(JSONObject.class));
     }
     @Test public void menusForMultipleAllowedUsersDoNotOverwriteEachOther() throws Exception {
         command("/esim");String selection=choice(1,CHAT);send("/esim",null,789L);tap(selection);
@@ -302,6 +305,6 @@ public class EsimProfilesTest {
         bot.reconcile();command("/esim");tap(confirm);
         assertEquals(3,profiles.length());verify(adapter,times(1)).download(EID,"LPA:1$example.com$uncertain","");
         verify(adapter,never()).enable(selectedCard(),anyString());verify(store,never()).number(anyString(),anyString());
-        verify(api).send(eq(CHAT),contains("Всего: 3"),notNull());
+        verify(api).send(eq(CHAT),contains("всего 3"),notNull());
     }
 }

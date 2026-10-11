@@ -64,6 +64,35 @@ public class BotConcurrencyTest {
         complete();verify(s).endOperation(1);verify(s).enqueueNotice(anyString(),eq(456L),contains("Профиль удалён"));
         verify(s,never()).enqueueNotice(anyString(),eq(789L),contains("Профиль удалён"));
     }
+    @Test public void savedProfileListAndSelectionAnswerDuringBlockedOperation() throws Exception {
+        when(lpa.cards()).thenReturn(new JSONArray().put(new JSONObject().put("eid",EID).put("slot",0).put("port",0)));
+        bot.reconcileAsync();worker.submit(()->{}).get(2,TimeUnit.SECONDS);
+        // First list: read once on the card thread and saved.
+        send("/esim",null,456);complete();clearInvocations(lpa);
+        release=new CountDownLatch(1);entered=new CountDownLatch(1);deleting();clearInvocations(lpa);
+        send("/esim",null,456);
+        verify(api).send(eq(456L),argThat(t->t.startsWith("Профили 9eSIM")&&t.contains("⏳")),notNull());
+        String nonce=new JSONObject(values.get("profile_menu:456")).getString("nonce");send("","select:"+nonce+":0",456);
+        verify(api).call(eq("editMessageText"),argThat(p->p.optString("text").contains(ICCID)));
+        verify(lpa,never()).cards();verify(lpa,never()).profiles(any(JSONObject.class));
+        complete();
+    }
+    @Test public void qrImageIsReadOutsideAdapterQueue() throws Exception {
+        deleting();
+        values.put("draft:456",new JSONObject().put("stage","qr").put("epoch","session").put("nonce","n").put("number","+79991234567")
+            .put("expires",System.currentTimeMillis()+60000).toString());
+        java.util.concurrent.atomic.AtomicReference<String> reader=new java.util.concurrent.atomic.AtomicReference<>();
+        when(api.file("qr")).thenAnswer(i->{reader.set(Thread.currentThread().getName());return new byte[0];});
+        JSONObject from=new JSONObject().put("id",456).put("is_bot",false);
+        JSONObject m=new JSONObject().put("message_id",30).put("photo",new JSONArray().put(new JSONObject().put("file_id","qr")))
+            .put("chat",new JSONObject().put("id",456).put("type","private")).put("from",from);
+        when(api.call(eq("getUpdates"),any())).thenReturn(new JSONObject().put("result",new JSONArray().put(new JSONObject().put("update_id",++update).put("message",m))));
+        bot.poll(api,0);
+        // The empty image is rejected with an answer, while the card operation is still running.
+        verify(api,timeout(2000)).send(eq(456L),contains("Файл изображения пуст"),isNull());
+        assertEquals("smsbridge-qr",reader.get());assertTrue("card operation still running",tasks.busy());
+        verify(s,timeout(2000)).endOperation(2);complete();
+    }
     @Test public void repeatDeleteWhileBusyIsRejectedAndNeverReplayed() throws Exception {
         deleting();send("","confirm:nonce",456);verify(api).send(eq(456L),contains("Новый запрос не запущен"),isNull());
         complete();verify(lpa,times(1)).delete(EID,ICCID,false);
@@ -90,8 +119,10 @@ public class BotConcurrencyTest {
     }
     @Test public void blockedAndroidSimListDoesNotBlockBotCommands() throws Exception {
         bot=new Bot(s,lpa,()->{block();return new JSONArray();},tasks);
-        send("/profiles",null,456);awaitBlocked();send("/start",null,789);
-        verify(api).send(eq(789L),contains("SMS Мост"),notNull());complete();
+        long started=System.nanoTime();send("/profiles",null,456);awaitBlocked();
+        assertTrue("bounded wait",System.nanoTime()-started<TimeUnit.SECONDS.toNanos(3));
+        verify(api).send(eq(456L),contains("не отвечает на запрос SIM"),isNull());
+        send("/start",null,789);verify(api).send(eq(789L),contains("SMS Мост"),notNull());complete();
     }
     @Test public void blockedDownloadDoesNotBlockCommandsOrRepeatQr() throws Exception {
         draft("confirm_add");when(lpa.download(eq(EID),anyString(),anyString())).thenAnswer(i->{block();return new JSONObject().put("eid",EID).put("iccid",ICCID);});
@@ -132,8 +163,9 @@ public class BotConcurrencyTest {
         when(api.call(eq("sendMessage"),any())).thenAnswer(i->{sending.countDown();assertTrue(finishSend.await(3,TimeUnit.SECONDS));return new JSONObject();});
         try {
             Future<?> pending=delivery.submit(()->Outbox.drain(context,s,api));assertTrue(sending.await(2,TimeUnit.SECONDS));assertFalse(tasks.busy());
+            // Android SIM list needs no card: it is answered directly, without the adapter queue.
             send("/profiles",null,456);complete();verify(s).endOperation(2);
-            verify(s).enqueueReply(anyString(),eq(456L),eq("sendMessage"),argThat(p->p.optString("text").startsWith("Мои SIM-карты")));
+            verify(api).send(eq(456L),startsWith("Мои SIM-карты"),notNull());
             assertFalse(tasks.busy());finishSend.countDown();pending.get(2,TimeUnit.SECONDS);verify(s).delivered(77);
         }finally{finishSend.countDown();delivery.shutdownNow();assertTrue(delivery.awaitTermination(2,TimeUnit.SECONDS));}
     }

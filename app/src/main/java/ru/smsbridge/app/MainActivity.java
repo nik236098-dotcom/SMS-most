@@ -41,7 +41,9 @@ public final class MainActivity extends Activity {
     private TextView status,stats,connection,error,smsDiagnostics;
     private Button relayToggle; private TextView setupLabel; private EditText tokenInput,idInput; private boolean launching;
     private final Runnable ticker=new Runnable(){public void run(){if(alive){if(homeVisible)refresh();handler.postDelayed(this,3000);}}};
-    @Override public void onCreate(Bundle b){super.onCreate(b);s=BridgeApp.store();if(s.running())try{RelayService.start(this);}catch(Exception e){s.put("bot_error",Telegram.safe(e));}home();handler.post(ticker);
+    @Override public void onCreate(Bundle b){super.onCreate(b);s=BridgeApp.store();
+        if(BridgeApp.settingsUnreadable()){recovery();return;}
+        if(s.running())try{RelayService.start(this);}catch(Exception e){s.put("bot_error",Telegram.safe(e));}home();handler.post(ticker);
         if(s.running()&&s.callsEnabled()&&!s.get("calls_permission_prompted","false").equals("true"))handler.post(()->{if(alive)callPermissions();});}
     private int dp(int n){return (int)(n*getResources().getDisplayMetrics().density+.5f);}
     private GradientDrawable shape(int color){GradientDrawable d=new GradientDrawable();d.setColor(color);d.setCornerRadius(dp(18));return d;}
@@ -75,6 +77,11 @@ public final class MainActivity extends Activity {
         if(s.chat()>0)idInput.setText(Rules.joinIds(s.chats()));
         label(root,"Укажи ID получателей через запятую, до 10 аккаунтов. Бот отвечает только им и отправляет SMS каждому. Каждый получатель должен написать боту /start. Telegram на Android открывать не нужно. Если ID неизвестен, оставь поле пустым — подключение одного получателя по коду.",14,false);
         relayToggle=button(root,s.running()?"Остановить бота":"Запустить бота",true,()->{if(s.running())stop();else launch();});
+        if(s.running()&&!RelayService.batteryUnrestricted(this)) {
+            TextView warning=label(root,"⚠️ Для SMS Моста включена оптимизация батареи. Android 12+ тогда может остановить бота в фоне и не дать ему перезапуститься: бот перестанет отвечать до нового SMS или открытия приложения.",14,false);
+            warning.setTextColor(Color.rgb(255,196,105));
+            button(root,"Снять ограничение батареи",true,this::batterySettings);
+        }
         LinearLayout state=card();status=label(state,"",20,true);connection=label(state,"",15,false);setupLabel=label(state,"",18,true);
         button(state,"Скопировать данные подключения",false,()->{
             String text="Бот: @"+s.get("bot_username","")+"\nКод: "+(s.chat()==0?s.setupCode():"Получатель уже подключён");
@@ -210,6 +217,24 @@ public final class MainActivity extends Activity {
             }}catch(Exception e){label(root,"Не удалось прочитать SIM: проверь разрешение «Телефон» в настройках приложения.",16,false);}
         button(root,"Обновить SIM-карты",false,this::physical);button(root,"Назад",false,this::home);
     }
+    private void batterySettings() {
+        try{startActivity(new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,Uri.parse("package:"+getPackageName())));}
+        catch(Exception e){try{startActivity(new Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS));}catch(Exception ignored){appSettings();}}
+    }
+    /** Android can no longer decrypt saved settings. Never crash on start; offer an explicit reset. */
+    private void recovery() {
+        page("Настройки не читаются","Android больше не может расшифровать сохранённые настройки SMS Моста");
+        label(root,"Обычно это происходит после сброса защищённого хранилища Android или обновления прошивки. Бот и пересылка SMS остановлены, пока настройки не будут сброшены.",15,false);
+        button(root,"Проверить снова",true,()->{if(BridgeApp.recheckSettings())toast("Настройки всё ещё не читаются. Попробуй перезагрузить телефон.");else{home();handler.post(ticker);}});
+        label(root,"Если не помогает и перезагрузка телефона: сброс удалит токен бота, получателей, номера SIM и очередь неотправленных сообщений этого приложения. Профили eSIM на адаптерах не затрагиваются.",15,false);
+        button(root,"Сбросить настройки SMS Моста",false,()->new AlertDialog.Builder(this).setTitle("Сбросить настройки?")
+            .setMessage("Токен, получатели, номера SIM и очередь будут удалены. После сброса открой приложение снова и настрой бота заново.")
+            .setNegativeButton("Отмена",null).setPositiveButton("Сбросить",(d,w)->{
+                try{stopService(new Intent(this,RelayService.class));}catch(Exception ignored){}
+                Store.wipe(this);toast("Настройки сброшены. Открой приложение снова.");finishAffinity();
+                handler.postDelayed(()->System.exit(0),800);
+            }).show());
+    }
     private void appSettings(){startActivity(new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,Uri.parse("package:"+getPackageName())));}
     private interface Task {String run() throws Exception;}
     private interface Done {void accept(String value);}
@@ -222,6 +247,6 @@ public final class MainActivity extends Activity {
         if(!accepted)toast("Адаптер занят. Дождись завершения текущей операции.");
     }
     private void toast(String text){Toast.makeText(this,text,Toast.LENGTH_LONG).show();}
-    @Override public void onBackPressed(){home();}
+    @Override public void onBackPressed(){if(BridgeApp.settingsUnreadable()){finish();return;}home();}
     @Override protected void onDestroy(){alive=false;handler.removeCallbacks(ticker);worker.shutdownNow();super.onDestroy();}
 }

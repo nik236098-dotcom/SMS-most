@@ -18,6 +18,7 @@ import android.net.Network;
 import android.os.BatteryManager;
 import android.os.Build;
 import android.os.IBinder;
+import android.telephony.SubscriptionManager;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -25,8 +26,13 @@ import java.util.concurrent.TimeUnit;
 public final class RelayService extends Service {
     private ScheduledExecutorService supervisor;private RecoveringTask sender,poller,adapter;
     private volatile boolean stopped;private Telegram pollingApi;private Bot worker;
-    private volatile long nextPoll;private int pollFailures;
-    private ConnectivityManager.NetworkCallback networkCallback;private volatile boolean networkReady;private Network defaultNetwork;
+    private volatile long nextPoll;private int pollFailures;private volatile boolean reconnecting;
+    private ConnectivityManager.NetworkCallback networkCallback;private volatile boolean networkReady;private volatile Network defaultNetwork;
+    private SubscriptionManager.OnSubscriptionsChangedListener simListener;
+    private volatile long loopSeen,statusSeen,checkRequested;private String shownTitle,shownText;
+    private static volatile RelayService current;
+    // A profile change is now detected from Android's SIM events. This is only a safety net.
+    static final long ADAPTER_CHECK_MILLIS=5*60000L;
     static void schedule(Context c) {
         JobScheduler jobs=c.getSystemService(JobScheduler.class);
         // Do not reset the retry interval on every SMS or foreground-service restart.
@@ -40,28 +46,48 @@ public final class RelayService extends Service {
         s.put("service_last_request",""+System.currentTimeMillis());
         try {schedule(c);s.put("service_schedule_error","");}
         catch(Exception e){s.put("service_schedule_error","Не удалось назначить повторную отправку ("+e.getClass().getSimpleName()+")");}
-        try {c.startForegroundService(new Intent(c,RelayService.class));}
+        try {c.startForegroundService(new Intent(c,RelayService.class));s.put("service_start_error","");}
         catch(RuntimeException e){s.put("service_start_error","Запуск сервиса отклонён ("+e.getClass().getSimpleName()+"). Проверь автозапуск и батарею.");throw e;}
     }
+    static boolean active(){RelayService s=current;return s!=null&&!s.stopped;}
+    /** New queued message or bot reply: deliver now instead of on the next one-second tick. */
+    static void deliverSoon() {
+        RelayService s=current;if(s==null||s.stopped||s.sender==null)return;
+        try{android.os.PowerManager.WakeLock lock=s.getSystemService(android.os.PowerManager.class).newWakeLock(android.os.PowerManager.PARTIAL_WAKE_LOCK,"smsbridge:wake");
+            lock.setReferenceCounted(false);lock.acquire(10000);}catch(RuntimeException ignored){}
+        s.sender.soon(0);
+    }
+    /** Re-read which profile is active, e.g. when Android reports a SIM change. Coalesced. */
+    static void requestAdapterCheck(){requestAdapterCheck(3000);}
+    static void requestAdapterCheck(long delayMillis) {
+        RelayService s=current;if(s==null||s.stopped||s.adapter==null)return;
+        long now=System.currentTimeMillis();if(now-s.checkRequested<2000)return;s.checkRequested=now;
+        s.adapter.soon(delayMillis);
+    }
     @Override public void onCreate() {
-        super.onCreate();Store s=BridgeApp.store();
-        if(!s.running()){stopSelf();return;}
+        super.onCreate();
+        // startForegroundService() requires startForeground() even when the service stops at once;
+        // otherwise Android crashes the whole app a few seconds later.
         try {
             getSystemService(NotificationManager.class).createNotificationChannel(new NotificationChannel("relay","SMS и входящие звонки",NotificationManager.IMPORTANCE_LOW));
-            Notification n=notification();
+            Notification n=placeholder();
             if(Build.VERSION.SDK_INT>=34)startForeground(7702,n,ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE);else startForeground(7702,n);
-            s.put("service_start_error","");
         } catch(RuntimeException e) {
-            s.put("service_start_error","Не удалось запустить постоянный сервис ("+e.getClass().getSimpleName()+")");stopSelf();return;
+            try{BridgeApp.store().put("service_start_error","Не удалось запустить постоянный сервис ("+e.getClass().getSimpleName()+")");}catch(RuntimeException ignored){}
+            stopSelf();return;
         }
+        Store s=BridgeApp.store();
+        try{if(!s.running()){stopSelf();return;}}catch(RuntimeException e){stopSelf();return;}
+        s.put("service_start_error","");
         worker=new Bot(this);pollingApi=new Telegram(s.get("token",""));
         s.put("bot_last_seen","0");s.put("bot_loop_seen","0");
         sender=new RecoveringTask(Executors.newSingleThreadScheduledExecutor(),this::deliver,
             e->s.put("error",Telegram.safe(e)),()->recovered("Отправка сообщений восстановлена"),1000);
         poller=new RecoveringTask(Executors.newSingleThreadScheduledExecutor(),this::pollOnce,
-            e->s.put("bot_error",Telegram.safe(e)),()->recovered("Приём команд восстановлен"),300);
+            e->s.put("bot_error",Telegram.safe(e)),()->recovered("Приём команд восстановлен"),100);
         adapter=new RecoveringTask(Executors.newSingleThreadScheduledExecutor(),worker::reconcileAsync,
-            e->s.put("esim_refresh_error",Telegram.safe(e)),()->recovered("Проверка адаптеров восстановлена"),10000);
+            e->s.put("esim_refresh_error",Telegram.safe(e)),()->recovered("Проверка адаптеров восстановлена"),ADAPTER_CHECK_MILLIS);
+        current=this;
         supervisor=Executors.newSingleThreadScheduledExecutor();
         supervisor.scheduleWithFixedDelay(()->{try{ensureTasks();}catch(Exception ignored){}},0,3,TimeUnit.SECONDS);
         try {
@@ -75,38 +101,71 @@ public final class RelayService extends Service {
             };
             getSystemService(ConnectivityManager.class).registerDefaultNetworkCallback(networkCallback);
         }catch(RuntimeException e){networkCallback=null;}
+        try {
+            // Switching a profile on the adapter makes Android load a SIM with another ICCID.
+            simListener=new SubscriptionManager.OnSubscriptionsChangedListener(){
+                @Override public void onSubscriptionsChanged(){requestAdapterCheck(4000);if(adapter!=null)adapter.soon(20000);}
+            };
+            SubscriptionManager subscriptions=getSystemService(SubscriptionManager.class);
+            if(Build.VERSION.SDK_INT>=30)subscriptions.addOnSubscriptionsChangedListener(Executors.newSingleThreadExecutor(),simListener);
+            else subscriptions.addOnSubscriptionsChangedListener(simListener);
+        }catch(RuntimeException e){simListener=null;}
     }
     private void recovered(String message){BridgeApp.store().put("connection_recovery",message+" · "+SmsDiagnostics.time(""+System.currentTimeMillis()));}
     private void ensureTasks() {
         if(stopped)return;if(sender!=null)sender.ensure();if(poller!=null)poller.ensure();if(adapter!=null)adapter.ensure();
     }
-    private void reconnect(){if(stopped)return;if(pollingApi!=null)pollingApi.reconnectPolling();nextPoll=0;ensureTasks();}
+    private void reconnect(){if(stopped)return;reconnecting=true;if(pollingApi!=null)pollingApi.reconnectPolling();nextPoll=0;ensureTasks();}
     private void pollOnce() throws Exception {
         Store s=BridgeApp.store();if(stopped||!s.running())return;
-        s.put("bot_loop_seen",""+System.currentTimeMillis());
+        long now=System.currentTimeMillis();
+        if(now-loopSeen>5000){loopSeen=now;s.put("bot_loop_seen",""+now);}
         if(System.nanoTime()<nextPoll)return;
         android.os.PowerManager.WakeLock lock=null;
         try {
             lock=getSystemService(android.os.PowerManager.class).newWakeLock(android.os.PowerManager.PARTIAL_WAKE_LOCK,"smsbridge:commands");lock.acquire(120000);
             worker.poll(pollingApi,10);pollFailures=0;
         }catch(Exception e){
-            nextPoll=System.nanoTime()+TimeUnit.MILLISECONDS.toNanos(Rules.retryMillis(pollFailures++,0));
-            s.put("bot_error",Telegram.safe(e));
-        }finally{if(lock!=null)try{if(lock.isHeld())lock.release();}catch(RuntimeException ignored){}}
+            if(reconnecting){
+                // We cancelled this request ourselves after a network change: poll again now.
+                reconnecting=false;nextPoll=0;pollFailures=0;
+            } else {
+                nextPoll=System.nanoTime()+TimeUnit.MILLISECONDS.toNanos(Rules.retryMillis(pollFailures++,0));
+                s.put("bot_error",Telegram.safe(e));
+            }
+        }finally{reconnecting=false;if(lock!=null)try{if(lock.isHeld())lock.release();}catch(RuntimeException ignored){}}
     }
     void deliver() {
         Store s=BridgeApp.store();if(!s.running()){stopSelf();return;}
-        try {s.put("service_last_work",""+System.currentTimeMillis());Outbox.drain(this);}
+        long now=System.currentTimeMillis();
+        try {
+            if(now-statusSeen>15000)s.put("service_last_work",""+now);
+            Outbox.drain(this);
+        }
         catch(Exception e){s.put("error",Telegram.safe(e));}
         // Optional status/notification refresh must not prevent delivery.
-        try {deviceStatus();getSystemService(NotificationManager.class).notify(7702,notification());}
+        try {
+            if(now-statusSeen>15000){statusSeen=now;deviceStatus();}
+            refreshNotification();
+        }
         catch(RuntimeException ignored){}
     }
-    private Notification notification() {
+    private Notification placeholder() {
+        return new Notification.Builder(this,"relay").setSmallIcon(ru.smsbridge.app.R.drawable.ic_bridge).setContentTitle("SMS Мост").setOngoing(true).build();
+    }
+    /** Repost only when the text changed: rebuilding it every second loaded the system UI. */
+    private void refreshNotification() {
+        Store s=BridgeApp.store();
+        String title="SMS Мост · "+BotHealth.summary(s);
+        String text=s.chat()==0?"Ожидает код от получателя в Telegram":"SMS и звонки в Telegram · в очереди: "+s.pending();
+        if(title.equals(shownTitle)&&text.equals(shownText))return;
+        getSystemService(NotificationManager.class).notify(7702,notification(title,text));shownTitle=title;shownText=text;
+    }
+    private Notification notification(String title,String text) {
         PendingIntent open=PendingIntent.getActivity(this,0,new Intent(this,MainActivity.class),PendingIntent.FLAG_IMMUTABLE|PendingIntent.FLAG_UPDATE_CURRENT);
         PendingIntent stop=PendingIntent.getService(this,1,new Intent(this,RelayService.class).setAction("STOP"),PendingIntent.FLAG_IMMUTABLE|PendingIntent.FLAG_UPDATE_CURRENT);
-        return new Notification.Builder(this,"relay").setSmallIcon(ru.smsbridge.app.R.drawable.ic_bridge).setContentTitle("SMS Мост · "+BotHealth.summary(BridgeApp.store()))
-            .setContentText(BridgeApp.store().chat()==0?"Ожидает код от получателя в Telegram":"SMS и звонки в Telegram · в очереди: "+BridgeApp.store().pending()).setOngoing(true).setContentIntent(open)
+        return new Notification.Builder(this,"relay").setSmallIcon(ru.smsbridge.app.R.drawable.ic_bridge).setContentTitle(title)
+            .setContentText(text).setOngoing(true).setContentIntent(open)
             .addAction(new Notification.Action.Builder(null,"Остановить",stop).build()).build();
     }
     private void deviceStatus() {
@@ -116,12 +175,24 @@ public final class RelayService extends Service {
         boolean plugged=b!=null&&b.getIntExtra(BatteryManager.EXTRA_PLUGGED,0)!=0;
         int level=b==null?-1:b.getIntExtra(BatteryManager.EXTRA_LEVEL,-1);
         BridgeApp.store().put("device_status",Build.MODEL+" · "+(online?(nc.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)?"Wi-Fi":"мобильный интернет"):"нет интернета")+" · "+(plugged?"на зарядке":"батарея "+level+"%"));
+        BridgeApp.store().put("battery_unrestricted",""+batteryUnrestricted(this));
+    }
+    /** Android 12+ refuses background restarts of this service unless battery optimisation is off. */
+    static boolean batteryUnrestricted(Context c) {
+        try{return c.getSystemService(android.os.PowerManager.class).isIgnoringBatteryOptimizations(c.getPackageName());}catch(RuntimeException e){return false;}
     }
     @Override public int onStartCommand(Intent i,int flags,int id) {
-        if(i!=null&&"STOP".equals(i.getAction())){BridgeApp.store().put("enabled","false");BridgeApp.store().put("bot_enabled","false");BridgeApp.store().resetCalls();stopSelf();return START_NOT_STICKY;}
-        if(!BridgeApp.store().running()){stopSelf();return START_NOT_STICKY;}
+        Store s=BridgeApp.store();
+        if(i!=null&&"STOP".equals(i.getAction())){s.put("enabled","false");s.put("bot_enabled","false");s.resetCalls();stopSelf();return START_NOT_STICKY;}
+        if(!s.running()||worker==null){stopSelf();return START_NOT_STICKY;}
         if(i!=null&&"RECONNECT".equals(i.getAction()))reconnect();else ensureTasks();return START_STICKY;
     }
     @Override public IBinder onBind(Intent i){return null;}
-    @Override public void onDestroy(){stopped=true;if(pollingApi!=null)pollingApi.close();if(networkCallback!=null)try{getSystemService(ConnectivityManager.class).unregisterNetworkCallback(networkCallback);}catch(RuntimeException ignored){}if(supervisor!=null)supervisor.shutdownNow();if(sender!=null)sender.close();if(poller!=null)poller.close();if(adapter!=null)adapter.close();super.onDestroy();}
+    @Override public void onDestroy(){
+        stopped=true;if(current==this)current=null;
+        if(pollingApi!=null)pollingApi.close();
+        if(networkCallback!=null)try{getSystemService(ConnectivityManager.class).unregisterNetworkCallback(networkCallback);}catch(RuntimeException ignored){}
+        if(simListener!=null)try{getSystemService(SubscriptionManager.class).removeOnSubscriptionsChangedListener(simListener);}catch(RuntimeException ignored){}
+        if(supervisor!=null)supervisor.shutdownNow();if(sender!=null)sender.close();if(poller!=null)poller.close();if(adapter!=null)adapter.close();super.onDestroy();
+    }
 }

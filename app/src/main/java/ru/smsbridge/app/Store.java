@@ -41,21 +41,36 @@ final class Store extends SQLiteOpenHelper {
         }
         throw new IllegalStateException("Unsupported database version");
     }
+    // Decrypted settings, read-through. Every thread (UI, SMS, polling, delivery) used to
+    // decrypt each value under this lock on every read. Values written inside a transaction
+    // are not cached until a later read outside it, so a rollback cannot leave a stale value.
+    private java.util.HashMap<String,String> cache;
+    private static final String MISSING="\u0000missing";
+    private java.util.HashMap<String,String> cache(){if(cache==null)cache=new java.util.HashMap<>();return cache;}
     synchronized String get(String k, String fallback) {
+        String known=cache().get(k);if(known!=null)return known==MISSING?fallback:known;
         try (Cursor c = getReadableDatabase().rawQuery("SELECT v FROM settings WHERE k=?", new String[]{k})) {
-            return c.moveToFirst() ? Crypto.open(c.getString(0)) : fallback;
+            String value=c.moveToFirst() ? Crypto.open(c.getString(0)) : null;
+            if(!inTransaction())cache().put(k,value==null?MISSING:value);
+            return value==null?fallback:value;
         } catch (Exception e) { throw new IllegalStateException("Не удалось прочитать защищённые настройки. Откройте приложение.", e); }
     }
     synchronized void put(String k, String v) {
+        boolean transaction=inTransaction();
+        if(!transaction&&v.equals(cache().get(k)))return;
         try { ContentValues cv = new ContentValues(); cv.put("k", k); cv.put("v", Crypto.seal(v));
             getWritableDatabase().insertWithOnConflict("settings", null, cv, SQLiteDatabase.CONFLICT_REPLACE);
-        } catch (Exception e) { throw new IllegalStateException("Не удалось сохранить настройки", e); }
+            if(transaction)cache().remove(k);else cache().put(k,v);
+        } catch (Exception e) {cache().remove(k);throw new IllegalStateException("Не удалось сохранить настройки", e); }
     }
+    private boolean inTransaction(){try{SQLiteDatabase db=getWritableDatabase();return db!=null&&db.inTransaction();}catch(RuntimeException e){return true;}}
+    /** Called only by explicit user recovery when Android can no longer decrypt saved settings. */
+    static void wipe(Context c){c.deleteDatabase("bridge.db");}
     boolean smsPermission() { return context.checkSelfPermission(android.Manifest.permission.RECEIVE_SMS)==android.content.pm.PackageManager.PERMISSION_GRANTED; }
     boolean phonePermission() { return context.checkSelfPermission(android.Manifest.permission.READ_PHONE_STATE)==android.content.pm.PackageManager.PERMISSION_GRANTED; }
     boolean callLogPermission() { return context.checkSelfPermission(android.Manifest.permission.READ_CALL_LOG)==android.content.pm.PackageManager.PERMISSION_GRANTED; }
     boolean callsEnabled() { return get("calls_enabled","true").equals("true"); }
-    synchronized void resetCalls() {getWritableDatabase().delete("settings","k LIKE 'call_state:%'",null);}
+    synchronized void resetCalls() {getWritableDatabase().delete("settings","k LIKE 'call_state:%'",null);cache().keySet().removeIf(k->k.startsWith("call_state:"));}
     synchronized void saveCall(String key,JSONObject next,JSONObject payload) throws Exception {
         SQLiteDatabase db=getWritableDatabase();db.beginTransaction();
         try {
@@ -144,7 +159,7 @@ final class Store extends SQLiteOpenHelper {
         }
     }
     synchronized void clearActive() { getWritableDatabase().delete("active", null, null); }
-    synchronized void clearActive(int slot) {getWritableDatabase().delete("active","slot=?",new String[]{""+slot});}
+    synchronized void clearActive(int slot) {getWritableDatabase().delete("active","slot=?",new String[]{""+slot});put("active_sub:"+slot,"");}
     synchronized boolean managed(int slot) {
         if(!get("esim_control","false").equals("true")||slot<0)return false;
         String cards=get("adapter_cards","");
@@ -178,19 +193,48 @@ final class Store extends SQLiteOpenHelper {
     synchronized void finishDelete(String nonce) throws Exception {
         JSONArray list=pendingDeletes(),rest=new JSONArray();for(int i=0;i<list.length();i++)if(!list.getJSONObject(i).getString("nonce").equals(nonce))rest.put(list.getJSONObject(i));put("pending_deletes",rest.toString());
     }
-    synchronized void active(int slot, String profile) {
-        ContentValues cv = new ContentValues(); cv.put("slot", slot); cv.put("profile", profile); cv.put("observed", System.currentTimeMillis());
-        getWritableDatabase().insertWithOnConflict("active", null, cv, SQLiteDatabase.CONFLICT_REPLACE);
+    void active(int slot, String profile) {
+        // Ask Android first, outside the lock: a slow telephony call must not stall SMS capture.
+        int sub=androidSubscription(slot);
+        synchronized(this) {
+            ContentValues cv = new ContentValues(); cv.put("slot", slot); cv.put("profile", profile); cv.put("observed", System.currentTimeMillis());
+            getWritableDatabase().insertWithOnConflict("active", null, cv, SQLiteDatabase.CONFLICT_REPLACE);
+            put("active_sub:"+slot,sub>=0?""+sub:"");
+        }
     }
-    synchronized String recipient(int slot, int subId) throws Exception {
+    /**
+     * Android keeps one subscription ID per ICCID. While the slot still reports the subscription
+     * seen when the card was read, the observed profile is still the active one; no polling needed.
+     */
+    int androidSubscription(int slot) {
+        try {
+            if(context==null||slot<0||!phonePermission())return -1;
+            android.telephony.SubscriptionManager manager=context.getSystemService(android.telephony.SubscriptionManager.class);
+            if(manager==null)return -1;
+            android.telephony.SubscriptionInfo info=BoundedCall.run(()->{
+                if(context.checkSelfPermission(android.Manifest.permission.READ_PHONE_STATE)!=android.content.pm.PackageManager.PERMISSION_GRANTED)return null;
+                return manager.getActiveSubscriptionInfoForSimSlotIndex(slot);
+            },1500);
+            return info==null?-1:info.getSubscriptionId();
+        } catch(Exception e){return -1;}
+    }
+    String recipient(int slot, int subId) throws Exception {
+        return recipient(slot,subId,subId>=0?subId:androidSubscription(slot));
+    }
+    synchronized String recipient(int slot, int subId, int current) throws Exception {
         if (!managed(slot)) return number("physical:"+subId);
         if (switching(slot)) return "Номер не определён: переключение eSIM";
         try (Cursor c = getReadableDatabase().rawQuery("SELECT profile,observed FROM active WHERE slot=?", new String[]{""+slot})) {
             if (c.moveToFirst()) {
-                // A stale adapter observation must never become a confidently labelled SMS.
-                if (System.currentTimeMillis() - c.getLong(1) > 25000) return "Номер не определён: профиль не проверен";
                 String eid=new JSONObject(get("adapter_cards","{}")).optString(""+slot,"");
                 if(!eid.isEmpty()&&!c.getString(0).startsWith(eid+":"))return "Номер не определён: адаптер изменился";
+                // Same Android subscription as when the card was read: the same profile is active.
+                String seen=get("active_sub:"+slot,"");
+                boolean confirmed=!seen.isEmpty()&&current>=0&&seen.equals(""+current);
+                // Otherwise only a fresh card observation may label the SMS.
+                if (!confirmed && System.currentTimeMillis() - c.getLong(1) > 25000) {
+                    RelayService.requestAdapterCheck();return "Номер не определён: профиль не проверен";
+                }
                 return number(c.getString(0));
             }
         }
@@ -206,7 +250,7 @@ final class Store extends SQLiteOpenHelper {
             ContentValues cv=new ContentValues();cv.put("fingerprint",fingerprint+"|"+target);cv.put("payload",Crypto.seal(copy.toString()));
             cv.put("created",System.currentTimeMillis());cv.put("route",route(target));
             long id=db.insertWithOnConflict("outbox",null,cv,SQLiteDatabase.CONFLICT_IGNORE);if(first<0)first=id;
-        } db.setTransactionSuccessful();return first;}finally{db.endTransaction();}
+        } db.setTransactionSuccessful();return first;}finally{db.endTransaction();RelayService.deliverSoon();}
     }
     synchronized JSONObject next() throws Exception {
         long now=System.currentTimeMillis();
@@ -224,6 +268,7 @@ final class Store extends SQLiteOpenHelper {
         ContentValues cv=new ContentValues();cv.put("fingerprint",fingerprint+"|"+target);cv.put("payload",Crypto.seal(p.toString()));
         cv.put("created",System.currentTimeMillis());cv.put("route",route(target));
         getWritableDatabase().insertWithOnConflict("outbox",null,cv,SQLiteDatabase.CONFLICT_IGNORE);
+        RelayService.deliverSoon();
     }
     synchronized void enqueueReply(String fingerprint,long target,String method,JSONObject request) throws Exception {
         if(!chats().contains(target))return;
@@ -233,6 +278,7 @@ final class Store extends SQLiteOpenHelper {
         ContentValues cv=new ContentValues();cv.put("fingerprint",fingerprint+"|"+target);cv.put("payload",Crypto.seal(p.toString()));
         cv.put("created",System.currentTimeMillis());cv.put("route",route(target));
         getWritableDatabase().insertWithOnConflict("outbox",null,cv,SQLiteDatabase.CONFLICT_IGNORE);
+        RelayService.deliverSoon();
     }
     synchronized void progress(long id, int nextPart) {
         ContentValues cv = new ContentValues(); cv.put("part", nextPart); cv.put("attempts", 0); cv.put("next_try", 0);
@@ -293,7 +339,8 @@ final class Store extends SQLiteOpenHelper {
     synchronized JSONArray recent(long target) throws Exception {return recent(target,null);}
     synchronized JSONArray recent(long target,String kind) throws Exception {
         JSONArray out = new JSONArray();
-        try (Cursor c = getReadableDatabase().rawQuery("SELECT id,payload,state,error FROM outbox WHERE route=? ORDER BY id DESC", new String[]{route(target)})) {
+        // Bounded: /calls used to decrypt a whole week of SMS under the global lock.
+        try (Cursor c = getReadableDatabase().rawQuery("SELECT id,payload,state,error FROM outbox WHERE route=? ORDER BY id DESC LIMIT 300", new String[]{route(target)})) {
             while(out.length()<10 && c.moveToNext()) {
                 JSONObject p=historyPayload(c.getString(1));
                 if(kind==null||p.optString("kind","sms").equals(kind))out.put(p.put("id",c.getLong(0)).put("state",c.getString(2)).put("error",c.getString(3)));
@@ -321,5 +368,39 @@ final class Store extends SQLiteOpenHelper {
         ContentValues cv = new ContentValues(); cv.put("state","done"); cv.put("updated",System.currentTimeMillis());
         getWritableDatabase().update("operations",cv,"id=?",new String[]{""+id});
         getWritableDatabase().delete("operations","state='done' AND updated<?",new String[]{""+(System.currentTimeMillis()-7*86400000L)});
+    }
+    /** Last profile lists read from the cards. Shown instantly; every action re-verifies on the card. */
+    synchronized JSONObject snapshot() throws Exception {
+        JSONObject v=new JSONObject(get("esim_snapshot","{}"));if(!v.has("cards"))v.put("cards",new JSONObject());return v;
+    }
+    synchronized void snapshotCard(JSONObject card,JSONArray profiles) throws Exception {
+        JSONObject all=snapshot(),cards=all.getJSONObject("cards");String eid=card.getString("eid");int slot=card.getInt("slot");
+        java.util.Iterator<String> keys=cards.keys();java.util.List<String> moved=new java.util.ArrayList<>();
+        while(keys.hasNext()){String other=keys.next();if(!other.equals(eid)&&cards.getJSONObject(other).optInt("slot",-1)==slot)moved.add(other);}
+        for(String other:moved)cards.remove(other);
+        JSONObject previous=cards.optJSONObject(eid);
+        JSONObject entry=new JSONObject().put("eid",eid).put("slot",slot).put("port",card.optInt("port",0))
+            .put("profiles",new JSONArray(profiles.toString())).put("time",System.currentTimeMillis());
+        if(previous!=null&&previous.has("info"))entry.put("info",previous.getJSONObject("info"));
+        cards.put(eid,entry);put("esim_snapshot",all.toString());
+    }
+    synchronized void snapshotDirty(String eid) throws Exception {
+        JSONObject all=snapshot(),card=all.getJSONObject("cards").optJSONObject(eid);if(card==null)return;
+        card.put("dirty",true);put("esim_snapshot",all.toString());
+    }
+    synchronized void snapshotInfo(String eid,JSONObject info) throws Exception {
+        JSONObject all=snapshot(),card=all.getJSONObject("cards").optJSONObject(eid);if(card==null||info==null)return;
+        card.put("info",info);put("esim_snapshot",all.toString());
+    }
+    /** A complete card scan: forget removed adapters, keep unreadable ones marked as unavailable. */
+    synchronized void snapshotCards(JSONArray scan) throws Exception {
+        JSONObject all=snapshot(),cards=all.getJSONObject("cards"),kept=new JSONObject();
+        java.util.Set<Integer> unavailable=new java.util.HashSet<>();java.util.Set<String> present=new java.util.HashSet<>();
+        for(int i=0;i<scan.length();i++){JSONObject c=scan.getJSONObject(i);if(c.optBoolean("unavailable"))unavailable.add(c.getInt("slot"));else present.add(c.getString("eid"));}
+        java.util.Iterator<String> keys=cards.keys();
+        while(keys.hasNext()){String eid=keys.next();JSONObject c=cards.getJSONObject(eid);
+            if(present.contains(eid))kept.put(eid,c.put("unavailable",false));
+            else if(unavailable.contains(c.optInt("slot",-1)))kept.put(eid,c.put("unavailable",true));}
+        put("esim_snapshot",all.put("cards",kept).toString());
     }
 }

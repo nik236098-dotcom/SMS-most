@@ -19,6 +19,9 @@ final class QrDecoder {
             throw new UserError("Не удалось прочитать размеры изображения QR-кода.");
         boolean transparent=false;
         for(int pixel:argb)if((pixel>>>24)!=255){transparent=true;break;}
+        // Phone photos and screenshots: a reduced copy is read several times faster. The full
+        // bounded set of interpretations below remains the fallback.
+        String quick=reduced(width,height,argb);if(quick!=null)return quick;
         // PNG alpha is meaningful: transparent black pixels must not become black background.
         // Also support white modules on a transparent background by compositing onto black.
         for(int background=0;background<(transparent?2:1);background++) {
@@ -42,6 +45,25 @@ final class QrDecoder {
             }
         }
         throw new UserError("Не удалось прочитать QR-код. Обрезанные изображения поддерживаются. Проверь, что все квадраты кода целиком видны; можно отправить оригинал как файл или строку LPA:1$…");
+    }
+    static final int QUICK_EDGE=1000;
+    private static String reduced(int width,int height,int[] argb) {
+        int edge=Math.max(width,height);if(edge<=QUICK_EDGE*5/4)return null;
+        int f=(edge+QUICK_EDGE-1)/QUICK_EDGE,w=width/f,h=height/f;if(w<21||h<21)return null;
+        byte[] gray=new byte[w*h];
+        for(int y=0;y<h;y++)for(int x=0;x<w;x++) {
+            int sum=0;
+            for(int dy=0;dy<f;dy++)for(int dx=0;dx<f;dx++) {
+                int p=argb[(y*f+dy)*width+x*f+dx],alpha=p>>>24,light=(((p>>>16)&255)+2*((p>>>8)&255)+(p&255))/4;
+                sum+=(light*alpha+255*(255-alpha)+127)/255;
+            }
+            gray[y*w+x]=(byte)(sum/(f*f));
+        }
+        Map<DecodeHintType,Object> hints=new EnumMap<>(DecodeHintType.class);hints.put(DecodeHintType.TRY_HARDER,true);
+        for(boolean inverted:new boolean[]{false,true})
+            try{return new QRCodeReader().decode(new BinaryBitmap(new HybridBinarizer(prepare(w,h,gray,inverted))),hints).getText();}
+            catch(ReaderException ignored){/* Fall back to the full-size image. */}
+        return null;
     }
     private static LuminanceSource prepare(int width,int height,byte[] gray,boolean inverted) {
         int scale=Math.min(4,Math.max(1,(384+Math.max(width,height)-1)/Math.max(width,height)));
