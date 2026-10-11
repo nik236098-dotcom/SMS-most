@@ -102,7 +102,7 @@ public class EsimProfilesTest {
         numbers.put(Rules.profileKey(EID,iccid(2)),"+79992222222");command("/esim");String selected=choice(1,CHAT);
         profiles=new JSONArray().put(profiles.getJSONObject(1)).put(profiles.getJSONObject(0));tap(selected);
         assertTrue(lastEdit().getString("text").contains(iccid(2)));tap(confirmation());
-        verify(adapter).enable(selectedCard(),eq(iccid(2)));verify(adapter).refresh(eq(store),any(JSONObject.class),argThat(ps->ps.length()==2&&ps.getJSONObject(0).getString("iccid").equals(iccid(2))));
+        verify(adapter).enable(selectedCard(),eq(iccid(2)));verify(adapter).refresh(eq(store),any(JSONObject.class),argThat(ps->ps.length()==2&&ps.optJSONObject(0).optString("iccid").equals(iccid(2))));
         verify(api).send(eq(CHAT),contains("Активирован профиль +79992222222"),notNull());
         assertEquals("false",settings.get("switching:0"));
     }
