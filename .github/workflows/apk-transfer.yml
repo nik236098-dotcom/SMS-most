@@ -1,0 +1,25 @@
+name: Temporary APK transfer
+# Temporary: copies the already built unified APK to a short-lived branch so it can be signed
+# outside CI. Removed right after use.
+on:
+  push:
+    branches: [claude/great-babbage-yg6epi]
+    paths: ['.github/workflows/apk-transfer.yml']
+permissions:
+  contents: write
+  actions: read
+jobs:
+  transfer:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Download built APK
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh run download 38236540770 --repo "$GITHUB_REPOSITORY" --name SMS-Most-Unified-APK --dir apk
+      - name: Push to transfer branch
+        run: |
+          cd apk && sha256sum *.apk > SHA256SUMS && cat SHA256SUMS
+          git init -q -b apk-transfer
+          git config user.name github-actions && git config user.email github-actions@users.noreply.github.com
+          git add . && git commit -qm "Unsigned unified APK from run 38236540770"
+          git push -f "https://x-access-token:${{ github.token }}@github.com/$GITHUB_REPOSITORY.git" apk-transfer
