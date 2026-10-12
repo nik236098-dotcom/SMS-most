@@ -89,4 +89,27 @@ public class QrDecoderTest {
         assertThrows(UserError.class,()->QrDecoder.decode(0,100,new int[0]));
         assertThrows(UserError.class,()->QrDecoder.decode(50,50,new int[1]));
     }
+    /** A small QR enlarged with bilinear smoothing, then cropped tightly: every module is a ramp. */
+    static int[] enlargedCrop(int px,int margin) throws Exception {
+        EnumMap<EncodeHintType,Object> hints=new EnumMap<>(EncodeHintType.class);hints.put(EncodeHintType.MARGIN,margin);
+        hints.put(EncodeHintType.ERROR_CORRECTION,com.google.zxing.qrcode.decoder.ErrorCorrectionLevel.H);
+        BitMatrix m=new QRCodeWriter().encode(CODE,BarcodeFormat.QR_CODE,1,1,hints);int n=m.getWidth();int[] out=new int[px*px];
+        for(int y=0;y<px;y++)for(int x=0;x<px;x++) {
+            double fx=Math.max(0,Math.min(n-1,(x+.5)*n/px-.5)),fy=Math.max(0,Math.min(n-1,(y+.5)*n/px-.5));
+            int x0=(int)fx,y0=(int)fy,x1=Math.min(n-1,x0+1),y1=Math.min(n-1,y0+1);double ax=fx-x0,ay=fy-y0;
+            double d=(m.get(x0,y0)?1:0)*(1-ax)*(1-ay)+(m.get(x1,y0)?1:0)*ax*(1-ay)+(m.get(x0,y1)?1:0)*(1-ax)*ay+(m.get(x1,y1)?1:0)*ax*ay;
+            int v=(int)Math.round(255-d*255);out[y*px+x]=0xFF000000|(v<<16)|(v<<8)|v;
+        }
+        return out;
+    }
+    @Test public void largeSmoothedCleanCropsAreRead() throws Exception {
+        // v0.19 failed on 1200/1, 1600/1, 1600/2, 2000/1 and 2000/2: typical operator QR images.
+        for(int px:new int[]{700,1200,1600,2000})for(int margin=0;margin<=2;margin++)
+            assertEquals(px+"/"+margin,CODE,QrDecoder.decode(px,px,enlargedCrop(px,margin)));
+    }
+    @Test public void reducedCopiesComeFirstAndOriginalLast() {
+        assertArrayEquals(new int[]{3,5,1},QrDecoder.factors(2000,2000));
+        assertArrayEquals(new int[]{1},QrDecoder.factors(500,500));
+        assertArrayEquals(new int[]{2,7,8},QrDecoder.enlargements(114));
+    }
 }

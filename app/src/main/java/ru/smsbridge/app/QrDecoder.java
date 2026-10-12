@@ -19,9 +19,6 @@ final class QrDecoder {
             throw new UserError("Не удалось прочитать размеры изображения QR-кода.");
         boolean transparent=false;
         for(int pixel:argb)if((pixel>>>24)!=255){transparent=true;break;}
-        // Phone photos and screenshots: a reduced copy is read several times faster. The full
-        // bounded set of interpretations below remains the fallback.
-        String quick=reduced(width,height,argb);if(quick!=null)return quick;
         // PNG alpha is meaningful: transparent black pixels must not become black background.
         // Also support white modules on a transparent background by compositing onto black.
         for(int background=0;background<(transparent?2:1);background++) {
@@ -30,39 +27,67 @@ final class QrDecoder {
                 int p=argb[i],alpha=p>>>24,light=(((p>>>16)&255)+2*((p>>>8)&255)+(p&255))/4;
                 gray[i]=(byte)((light*alpha+backdrop*(255-alpha)+127)/255);
             }
-            for(boolean inverted:new boolean[]{false,true}) {
-                LuminanceSource source=prepare(width,height,gray,inverted);
-                for(boolean global:new boolean[]{false,true}) {
-                    BinaryBitmap bitmap=new BinaryBitmap(global?new GlobalHistogramBinarizer(source):new HybridBinarizer(source));
-                    for(boolean pure:new boolean[]{false,true}) {
-                        Map<DecodeHintType,Object> hints=new EnumMap<>(DecodeHintType.class);
-                        hints.put(DecodeHintType.TRY_HARDER,true);
-                        if(pure)hints.put(DecodeHintType.PURE_BARCODE,true);
-                        try{return new QRCodeReader().decode(bitmap,hints).getText();}
-                        catch(ReaderException ignored){/* Try the next bounded image interpretation. */}
-                    }
-                }
+            // A clean cropped code is often large with smoothed module edges; ZXing misses some
+            // of those at full size. Reduced copies (also much faster) are tried first.
+            for(int factor:factors(width,height)) {
+                int w=width/factor,h=height/factor;
+                String text=attempts(w,h,factor==1?gray:shrink(gray,width,height,factor));if(text!=null)return text;
+            }
+            // Small, blurry codes (e.g. a JPEG-compressed thumbnail): a smooth enlargement keeps
+            // module edges where nearest-neighbour scaling leaves them jagged.
+            int edge=Math.max(width,height);
+            if(edge<500)for(int k:enlargements(edge)) {
+                String text=attempts(width*k,height*k,enlarge(gray,width,height,k));if(text!=null)return text;
             }
         }
         throw new UserError("Не удалось прочитать QR-код. Обрезанные изображения поддерживаются. Проверь, что все квадраты кода целиком видны; можно отправить оригинал как файл или строку LPA:1$…");
     }
-    static final int QUICK_EDGE=1000;
-    private static String reduced(int width,int height,int[] argb) {
-        int edge=Math.max(width,height);if(edge<=QUICK_EDGE*5/4)return null;
-        int f=(edge+QUICK_EDGE-1)/QUICK_EDGE,w=width/f,h=height/f;if(w<21||h<21)return null;
-        byte[] gray=new byte[w*h];
+    /** Integer reductions bringing the long edge near 700 and 400 px, then the original. */
+    static int[] factors(int width,int height) {
+        int edge=Math.max(width,height);java.util.LinkedHashSet<Integer> out=new java.util.LinkedHashSet<>();
+        for(int target:new int[]{700,400}){int f=Math.round(edge/(float)target);if(f>=2&&Math.min(width,height)/f>=42)out.add(f);}
+        out.add(1);int[] list=new int[out.size()];int i=0;for(int f:out)list[i++]=f;return list;
+    }
+    /** Small images: a few smooth enlargement factors; module edges land differently for each. */
+    static int[] enlargements(int edge) {
+        java.util.LinkedHashSet<Integer> out=new java.util.LinkedHashSet<>();
+        for(int target:new int[]{0,700,900}){int k=target==0?2:(target+edge-1)/edge;if(k>=2&&k<=8)out.add(k);}
+        int[] list=new int[out.size()];int i=0;for(int k:out)list[i++]=k;return list;
+    }
+    private static byte[] shrink(byte[] gray,int width,int height,int f) {
+        int w=width/f,h=height/f,area=f*f;byte[] out=new byte[w*h];
         for(int y=0;y<h;y++)for(int x=0;x<w;x++) {
-            int sum=0;
-            for(int dy=0;dy<f;dy++)for(int dx=0;dx<f;dx++) {
-                int p=argb[(y*f+dy)*width+x*f+dx],alpha=p>>>24,light=(((p>>>16)&255)+2*((p>>>8)&255)+(p&255))/4;
-                sum+=(light*alpha+255*(255-alpha)+127)/255;
-            }
-            gray[y*w+x]=(byte)(sum/(f*f));
+            int sum=0;for(int dy=0;dy<f;dy++){int row=(y*f+dy)*width+x*f;for(int dx=0;dx<f;dx++)sum+=gray[row+dx]&255;}
+            out[y*w+x]=(byte)((sum+area/2)/area);
         }
-        Map<DecodeHintType,Object> hints=new EnumMap<>(DecodeHintType.class);hints.put(DecodeHintType.TRY_HARDER,true);
-        for(boolean inverted:new boolean[]{false,true})
-            try{return new QRCodeReader().decode(new BinaryBitmap(new HybridBinarizer(prepare(w,h,gray,inverted))),hints).getText();}
-            catch(ReaderException ignored){/* Fall back to the full-size image. */}
+        return out;
+    }
+    private static byte[] enlarge(byte[] gray,int width,int height,int k) {
+        int w=width*k,h=height*k;byte[] out=new byte[w*h];
+        for(int y=0;y<h;y++) {
+            float sy=Math.max(0,Math.min(height-1,(y+.5f)/k-.5f));int y0=(int)sy,y1=Math.min(height-1,y0+1);float fy=sy-y0;
+            for(int x=0;x<w;x++) {
+                float sx=Math.max(0,Math.min(width-1,(x+.5f)/k-.5f));int x0=(int)sx,x1=Math.min(width-1,x0+1);float fx=sx-x0;
+                float top=(gray[y0*width+x0]&255)*(1-fx)+(gray[y0*width+x1]&255)*fx,bottom=(gray[y1*width+x0]&255)*(1-fx)+(gray[y1*width+x1]&255)*fx;
+                out[y*w+x]=(byte)Math.round(top*(1-fy)+bottom*fy);
+            }
+        }
+        return out;
+    }
+    private static String attempts(int width,int height,byte[] gray) {
+        for(boolean inverted:new boolean[]{false,true}) {
+            LuminanceSource source=prepare(width,height,gray,inverted);
+            for(boolean global:new boolean[]{false,true}) {
+                BinaryBitmap bitmap=new BinaryBitmap(global?new GlobalHistogramBinarizer(source):new HybridBinarizer(source));
+                for(boolean pure:new boolean[]{false,true}) {
+                    Map<DecodeHintType,Object> hints=new EnumMap<>(DecodeHintType.class);
+                    hints.put(DecodeHintType.TRY_HARDER,true);
+                    if(pure)hints.put(DecodeHintType.PURE_BARCODE,true);
+                    try{return new QRCodeReader().decode(bitmap,hints).getText();}
+                    catch(ReaderException ignored){/* Try the next bounded image interpretation. */}
+                }
+            }
+        }
         return null;
     }
     private static LuminanceSource prepare(int width,int height,byte[] gray,boolean inverted) {
