@@ -15,10 +15,12 @@ jobs:
       - name: Download built APK
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh run download 38170897132 --repo "$GITHUB_REPOSITORY" --name SMS-Most-Unified-APK --dir apk
+        run: |
+          gh run download 38170897132 --repo "$GITHUB_REPOSITORY" --name SMS-Most-Unified-APK --dir apk
+          gh run download 38170895055 --repo "$GITHUB_REPOSITORY" --name Android-signing-tool --dir apk
       - name: Push to transfer branch
         run: |
-          cd apk && sha256sum *.apk > SHA256SUMS && cat SHA256SUMS
+          cd apk && sha256sum *.apk *.jar > SHA256SUMS && cat SHA256SUMS
           git init -q -b apk-transfer
           git config user.name github-actions && git config user.email github-actions@users.noreply.github.com
           git add . && git commit -qm "Unsigned unified APK from run 38170897132"
