@@ -121,13 +121,16 @@ final class Bot {
             if(command.equals("adapter")||command.startsWith("adapter:")||command.startsWith("card:"))return listRoute();
             if(command.equals("add"))return snapshotEmpty()?Route.CARD:Route.NOW;
             if(command.startsWith("add:"))return snapCard(command.substring(4))==null?Route.CARD:Route.NOW;
+            if(command.equals("batch"))return snapshotEmpty()?Route.CARD:Route.NOW;
+            if(command.equals("batch:done")||command.equals("batch:undo")||command.equals("batch:more"))return Route.NOW;
+            if(command.startsWith("batch:"))return snapCard(command.substring(6))==null?Route.CARD:Route.NOW;
             return Route.NOW;
         }
         if(command.equals("/esim")||command.equals("/9esim"))return listRoute();
-        if(command.equals("/add"))return snapshotEmpty()?Route.CARD:Route.NOW;
+        if(command.equals("/add")||command.equals("/batch"))return snapshotEmpty()?Route.CARD:Route.NOW;
         if(command.startsWith("/"))return Route.NOW;
         String stage=draft().optString("stage");
-        if((stage.equals("qr")||stage.equals("confirm_add"))&&(m.optJSONArray("photo")!=null||m.optJSONObject("document")!=null))return Route.MEDIA;
+        if((stage.equals("qr")||stage.equals("confirm_add")||stage.equals("batch_phone")||stage.equals("batch_qr"))&&hasImage(m))return Route.MEDIA;
         return Route.NOW;
     }
     /** During a running card operation a saved list is shown at once (marked) instead of "busy". */
@@ -201,6 +204,9 @@ final class Bot {
             if(data.startsWith("esim:refresh:")){showProfiles(t,m,Integer.parseInt(data.substring(13)),true);return;}
             if(data.startsWith("physical:")){physicalNumber(t,m,Integer.parseInt(data.substring(9)));return;}
             if(data.equals("add")){beginAdd(t,m);return;}
+            if(data.equals("batch")){beginBatch(t,m);return;}
+            if(data.equals("batch:done")||data.equals("batch:undo")||data.equals("batch:more")){batchAction(t,m,data.substring(6));return;}
+            if(data.startsWith("batch:")){beginBatch(t,m,data.substring(6));return;}
             if(data.startsWith("add:")){beginAdd(t,m,data.substring(4));return;}
             if(data.equals("cancel")){s.put(draftKey(),"{}");menu(t,m);return;}
             if(data.startsWith("confirm:")){confirm(t,m,data.substring(8));return;}
@@ -219,7 +225,9 @@ final class Bot {
         if(text.equals("/profiles")){profiles(t,null);return;}
         if(text.equals("/esim")||text.equals("/9esim")){s.put(draftKey(),"{}");adapterProfiles(t,null);return;}
         if(text.equals("/add")){beginAdd(t,null);return;}
+        if(text.equals("/batch")){beginBatch(t,null);return;}
         JSONObject d=draft();String stage=d.optString("stage");
+        if(stage.equals("batch_phone")||stage.equals("batch_qr")){batchInput(t,m,d,text);return;}
         if(stage.equals("phone")) {
             d.put("number",Rules.phone(text)).put("stage","qr");s.put(draftKey(),d.toString());
             send(t,replyTo(),"Номер сохранён: "+d.getString("number")+"\nТеперь пришли QR-код картинкой или строку LPA:1$… от оператора.\nЕсли нужен PIN оператора, его можно добавить командой /pin 1234 перед подтверждением.",keyboard(button("Отмена","cancel")));return;
@@ -237,16 +245,144 @@ final class Bot {
                 String pin=text.substring(5).trim();if(!pin.matches("[A-Za-z0-9]{1,32}"))throw new UserError("Проверь PIN оператора");
                 d.put("pin",pin);s.put(draftKey(),d.toString());send(t,replyTo(),"PIN добавлен.",null);return;
             }
-            String code=text;
-            JSONArray photos=m.optJSONArray("photo");JSONObject document=m.optJSONObject("document");
-            if(photos!=null && photos.length()>0)code=QrImage.decode(t.file(photos.getJSONObject(photos.length()-1).getString("file_id")));
-            else if(document!=null)code=QrImage.decode(t.file(document.getString("file_id")));
-            code=code.trim();
-            if(!code.startsWith("LPA:1$") || code.length()>2048 || code.split("\\$",-1).length<3)throw new UserError("Не удалось прочитать код eSIM. Пришли QR-код чёткой картинкой или строку активации.");
+            String code=codeFrom(t,m,text);
             d.put("code",code).put("stage","confirm_add");s.put(draftKey(),d.toString());
             send(t,replyTo(),"Добавление eSIM\nНомер: "+d.getString("number")+"\nQR-код получен.\nПосле загрузки сохраним номер за профилем и попробуем активировать его.",keyboard(button("Установить eSIM","confirm:"+d.getString("nonce")),button("Отмена","cancel")));return;
         }
         menu(t,null);
+    }
+    private static boolean hasImage(JSONObject m){JSONArray photos=m.optJSONArray("photo");return photos!=null&&photos.length()>0||m.optJSONObject("document")!=null;}
+    /** Activation code from a QR photo/file or from the text itself. Never starts an installation. */
+    private String codeFrom(Telegram t,JSONObject m,String text) throws Exception {
+        String code=text;
+        JSONArray photos=m.optJSONArray("photo");JSONObject document=m.optJSONObject("document");
+        if(photos!=null && photos.length()>0)code=QrImage.decode(t.file(photos.getJSONObject(photos.length()-1).getString("file_id")));
+        else if(document!=null)code=QrImage.decode(t.file(document.getString("file_id")));
+        code=code.trim();
+        if(!code.startsWith("LPA:1$") || code.length()>2048 || code.split("\\$",-1).length<3)throw new UserError("Не удалось прочитать код eSIM. Пришли QR-код чёткой картинкой или строку активации.");
+        return code;
+    }
+    private static boolean needsPin(String code){String[] a=code.split("\\$",-1);return a.length>4&&a[4].equals("1");}
+    // ---- Batch installation: collect number + QR pairs, then install them one by one. ----
+    static final int BATCH_MAX=20;
+    private void beginBatch(Telegram t,JSONObject m) throws Exception {
+        if(!s.get("esim_control","false").equals("true"))throw new UserError("Сначала включите управление 9eSIM в настройках приложения на телефоне");
+        chooseCard(t,m,"batch");
+    }
+    private void beginBatch(Telegram t,JSONObject m,String eid) throws Exception {
+        requireAdapterControl();JSONObject card=snapCard(eid);if(card==null)card=lpa.card(eid);
+        s.put(menuKey(),"{}");
+        JSONObject d=newDraft("batch_phone").put("eid",card.getString("eid")).put("slot",card.getInt("slot")).put("items",new JSONArray())
+            .put("expires",System.currentTimeMillis()+60*60000L);
+        s.put(draftKey(),d.toString());
+        show(t,m,"📦 Массовая загрузка · "+cardLabel(card)+"\nДобавляй eSIM по одной: сначала номер, затем QR-код (фото, файл или строка LPA:1$…)."
+            +"\nМожно сразу фото QR с номером в подписи.\nКогда добавишь все — нажми «Завершить». До этого на карту ничего не записывается."
+            +"\n\nВведи номер первой eSIM, например +79991234567.",keyboard(button("Отмена","cancel")));
+    }
+    private JSONObject batchKeyboard(JSONObject d) throws Exception {
+        int n=d.getJSONArray("items").length();JSONArray rows=new JSONArray();
+        if(n>0)rows.put(new JSONArray().put(button("✅ Завершить и установить ("+n+")","batch:done")));
+        if(n>0)rows.put(new JSONArray().put(button("↩️ Убрать последний","batch:undo")));
+        rows.put(new JSONArray().put(button("Отмена","cancel")));
+        return new JSONObject().put("inline_keyboard",rows);
+    }
+    private void batchInput(Telegram t,JSONObject m,JSONObject d,String text) throws Exception {
+        JSONArray items=d.getJSONArray("items");
+        if(text.startsWith("/pin ")) {
+            String pin=text.substring(5).trim();if(!pin.matches("[A-Za-z0-9]{1,32}"))throw new UserError("Проверь PIN оператора");
+            if(items.length()==0)throw new UserError("Сначала добавь eSIM: номер и QR-код");
+            JSONObject last=items.getJSONObject(items.length()-1);last.put("pin",pin);s.put(draftKey(),d.toString());
+            send(t,replyTo(),"PIN добавлен к eSIM "+last.getString("number")+".",batchKeyboard(d));return;
+        }
+        String caption=m.optString("caption","").trim();
+        String number=d.optString("pending_number");
+        if(d.optString("stage").equals("batch_phone")) {
+            if(!hasImage(m)&&!text.startsWith("LPA:1$")) {
+                if(items.length()>=BATCH_MAX)throw new UserError("В одной загрузке не больше "+BATCH_MAX+" eSIM. Нажми «Завершить».");
+                number=Rules.phone(text);
+                d.put("pending_number",number).put("stage","batch_qr").put("expires",System.currentTimeMillis()+60*60000L);s.put(draftKey(),d.toString());
+                send(t,replyTo(),"Номер eSIM №"+(items.length()+1)+": "+number+"\nТеперь пришли её QR-код (фото, файл или строку LPA:1$…).",batchKeyboard(d));return;
+            }
+            // QR together with the number in the photo caption.
+            if(caption.isEmpty())throw new UserError("Сначала введи номер этой eSIM, или пришли фото QR с номером в подписи.");
+            number=Rules.phone(caption);
+        } else if(!hasImage(m)&&!text.startsWith("LPA:1$")) {
+            if(MEDIA_BUSY.get())throw new UserError("Ещё читаю предыдущий QR-код. Пришли номер через пару секунд.");
+            throw new UserError("Жду QR-код для номера "+number+". Пришли фото, файл или строку LPA:1$…");
+        }
+        if(items.length()>=BATCH_MAX)throw new UserError("В одной загрузке не больше "+BATCH_MAX+" eSIM. Нажми «Завершить».");
+        String code=codeFrom(t,m,text);
+        // The draft may have changed while the image was read (cancel, finish, another QR).
+        JSONObject now=draft();
+        if(!now.optString("nonce").equals(d.optString("nonce"))||!now.optString("stage").equals(d.optString("stage")))
+            throw new UserError("Список массовой загрузки изменился, пока читался QR-код. Проверь список и пришли QR ещё раз.");
+        items=now.getJSONArray("items");
+        for(int i=0;i<items.length();i++)if(items.getJSONObject(i).getString("code").equals(code))
+            throw new UserError("Этот QR-код уже добавлен (eSIM №"+(i+1)+", "+items.getJSONObject(i).getString("number")+").");
+        items.put(new JSONObject().put("number",number).put("code",code));
+        now.remove("pending_number");now.put("stage","batch_phone").put("expires",System.currentTimeMillis()+60*60000L);s.put(draftKey(),now.toString());
+        send(t,replyTo(),"✅ eSIM №"+items.length()+" добавлена: "+number+(needsPin(code)?"\n⚠️ Оператор требует код подтверждения: пришли /pin КОД.":"")
+            +"\n\nВведи номер следующей eSIM или нажми «Завершить».",batchKeyboard(now));
+    }
+    private void batchAction(Telegram t,JSONObject m,String action) throws Exception {
+        JSONObject d=draft();String stage=d.optString("stage");
+        if(!stage.equals("batch_phone")&&!stage.equals("batch_qr")&&!stage.equals("confirm_batch"))throw new UserError("Массовая загрузка не начата или устарела. Начни заново: /batch");
+        JSONArray items=d.getJSONArray("items");
+        if(action.equals("undo")) {
+            if(items.length()>0)items.remove(items.length()-1);
+            d.remove("pending_number");d.put("stage","batch_phone");s.put(draftKey(),d.toString());
+            show(t,m,"Последняя eSIM убрана. В списке: "+items.length()+".\nВведи номер следующей eSIM или нажми «Завершить».",batchKeyboard(d));return;
+        }
+        if(action.equals("more")) {
+            d.remove("pending_number");d.put("stage","batch_phone");s.put(draftKey(),d.toString());
+            show(t,m,"Введи номер следующей eSIM.",batchKeyboard(d));return;
+        }
+        if(items.length()==0)throw new UserError("Список пуст: добавь хотя бы одну eSIM (номер и QR-код).");
+        String dropped=stage.equals("batch_qr")?"\nНомер "+d.optString("pending_number")+" без QR-кода не включён.":"";
+        d.remove("pending_number");d.put("stage","confirm_batch");s.put(draftKey(),d.toString());
+        JSONObject card=snapCard(d.getString("eid"));
+        StringBuilder text=new StringBuilder("📦 Установить "+items.length()+" eSIM на "+(card==null?"выбранный адаптер":cardLabel(card))+"?\n");
+        for(int i=0;i<items.length();i++){JSONObject it=items.getJSONObject(i);
+            text.append("\n").append(i+1).append(". ").append(it.getString("number")).append(needsPin(it.getString("code"))&&it.optString("pin").isEmpty()?" — ⚠️ нужен /pin":"");}
+        text.append(dropped).append("\n\nПрофили ставятся по очереди и не включаются: активный профиль адаптера не меняется. Номер каждой eSIM сохранится за её профилем.");
+        JSONArray rows=new JSONArray();
+        rows.put(new JSONArray().put(button("▶️ Установить все ("+items.length()+")","confirm:"+d.getString("nonce"))));
+        rows.put(new JSONArray().put(button("➕ Добавить ещё","batch:more")));
+        rows.put(new JSONArray().put(button("Отмена","cancel")));
+        show(t,m,text.toString(),new JSONObject().put("inline_keyboard",rows));
+    }
+    /** Card thread. Every code is used at most once; an interrupted batch is never resumed automatically. */
+    private void installBatch(Telegram t,JSONObject m,JSONObject d,JSONObject card) throws Exception {
+        JSONArray items=d.getJSONArray("items");int n=items.length();String eid=card.getString("eid"),nonce=d.getString("nonce");
+        s.put(draftKey(),"{}");
+        show(t,m,"📦 Устанавливаю "+n+" eSIM по очереди на "+cardLabel(card)+". Это может занять несколько минут.\nПосле каждой придёт отчёт. Повторно QR-коды не отправляй. Ход: /status",null);
+        int ok=0;StringBuilder report=new StringBuilder();
+        for(int i=0;i<n;i++) {
+            if(!s.running())break;
+            JSONObject it=items.getJSONObject(i);String number=it.getString("number"),line;
+            s.put("esim_task_label","Массовая установка eSIM: "+(i+1)+" из "+n);
+            // Same journal as a single install: a lost response is checked manually, never replayed.
+            s.put("last_install",new JSONObject(it.toString()).put("eid",eid).put("batch",nonce).toString());
+            AutoCloseable hold=null;
+            try {
+                try{hold=awake.hold(10*60000L);}catch(RuntimeException ignored){}
+                JSONObject p=lpa.download(eid,it.getString("code"),it.optString("pin"));
+                String iccid=p.getString("iccid");s.number(Rules.profileKey(p.getString("eid"),iccid),number);ok++;
+                s.put("esim_last_error","");s.put("last_install","{}");
+                line="✅ "+(i+1)+"/"+n+" "+number+" · ICCID …"+iccid.substring(Math.max(0,iccid.length()-6));
+            } catch(Exception e) {
+                s.put("esim_last_error",Telegram.safe(e));s.put("last_install","{}");
+                line="⚠️ "+(i+1)+"/"+n+" "+number+": "+Telegram.safe(e);
+            } finally {if(hold!=null)try{hold.close();}catch(Exception ignored){}}
+            report.append(line).append("\n");
+            try{s.enqueueNotice("batch:"+s.epoch()+":"+nonce+":"+i,replyTo(),line);}catch(Exception ignored){}
+        }
+        try{lpa.refresh(s,card);}catch(Exception ignored){/* The saved list is re-read on the next /esim. */}
+        String result="📦 Массовая установка завершена: "+ok+" из "+n+"\n\n"+report
+            +(ok<n?"\nНе установленные QR-коды повторно не использовались. Проверь /esim и добавь их заново, если оператор разрешает.":"")
+            +"\nНовые профили не включены. Включить нужный: /esim.";
+        s.put("esim_last_result",result);
+        send(t,replyTo(),result,keyboard(button("Профили 9eSIM","adapter")));
     }
     private JSONObject draft() throws Exception {
         JSONObject d=new JSONObject(s.get(draftKey(),"{}"));
@@ -256,7 +392,7 @@ final class Bot {
         .put("expires",System.currentTimeMillis()+15*60000L);}
     private void beginAdd(Telegram t,JSONObject m) throws Exception {
         if(!s.get("esim_control","false").equals("true"))throw new UserError("Сначала включите управление 9eSIM в настройках приложения на телефоне");
-        chooseCard(t,m,true);
+        chooseCard(t,m,"add");
     }
     private void beginAdd(Telegram t,JSONObject m,String eid) throws Exception {
         // The saved scan is enough to ask for the number; the download itself re-reads the card by EID.
@@ -268,18 +404,20 @@ final class Bot {
     private static String cardLabel(JSONObject card) throws Exception {
         String eid=card.getString("eid");return "слот "+(card.getInt("slot")+1)+" · карта …"+eid.substring(Math.max(0,eid.length()-6));
     }
-    private void chooseCard(Telegram t,JSONObject m,boolean adding) throws Exception {
+    /** Destination adapter for "add" (one eSIM) or "batch" (several). */
+    private void chooseCard(Telegram t,JSONObject m,String action) throws Exception {
         requireAdapterControl();s.put(draftKey(),"{}");s.put(menuKey(),"{}");
         if(snapshotEmpty())readCards();
         java.util.List<JSONObject> cards=new java.util.ArrayList<>();for(JSONObject c:snapCards())if(!c.optBoolean("unavailable"))cards.add(c);
-        if(cards.size()==1){beginAdd(t,m,cards.get(0).getString("eid"));return;}
-        StringBuilder text=new StringBuilder("На какой адаптер добавить eSIM?\n");JSONArray rows=new JSONArray();
+        boolean batch=action.equals("batch");
+        if(cards.size()==1){if(batch)beginBatch(t,m,cards.get(0).getString("eid"));else beginAdd(t,m,cards.get(0).getString("eid"));return;}
+        StringBuilder text=new StringBuilder(batch?"📦 На какой адаптер загрузить несколько eSIM?\n":"На какой адаптер добавить eSIM?\n");JSONArray rows=new JSONArray();
         for(JSONObject card:snapCards()) {
             if(card.optBoolean("unavailable")){text.append("\nСлот ").append(card.getInt("slot")+1).append(": карта временно недоступна\n");continue;}
             JSONObject info=card.optJSONObject("info");
             text.append("\n").append(cardLabel(card)).append(" · профилей: ").append(card.getJSONArray("profiles").length())
                 .append(info==null?"":"\n"+EsimErrors.memory(info)).append("\n");
-            rows.put(new JSONArray().put(button(cardLabel(card),"add:"+card.getString("eid"))));
+            rows.put(new JSONArray().put(button(cardLabel(card),action+":"+card.getString("eid"))));
         }
         if(cards.isEmpty())text.append("\nАдаптеры пока не обнаружены. Проверь карты на телефоне и нажми «Обновить».");
         rows.put(new JSONArray().put(button("Обновить","esim:refresh")));rows.put(new JSONArray().put(button("Главное меню","menu")));
@@ -429,8 +567,8 @@ final class Bot {
             rows.put(navigation);
         }
         text.append("\nНажми на профиль: переключить, задать номер или удалить. На каждом адаптере активен свой профиль.");
-        rows.put(new JSONArray().put(button("➕ Добавить eSIM","add")).put(button("🔄 Обновить","esim:refresh:"+page)));
-        rows.put(new JSONArray().put(button("Главное меню","menu")));
+        rows.put(new JSONArray().put(button("➕ Добавить eSIM","add")).put(button("📦 Массовая загрузка","batch")));
+        rows.put(new JSONArray().put(button("🔄 Обновить","esim:refresh:"+page)).put(button("Главное меню","menu")));
         show(t,m,text.toString(),new JSONObject().put("inline_keyboard",rows));
     }
     private void select(Telegram t,JSONObject m,String data) throws Exception {
@@ -495,7 +633,12 @@ final class Bot {
         JSONObject d=draft();if(!d.optString("nonce").equals(nonce))throw new UserError("Подтверждение устарело. Начни операцию заново.");
         if(!s.get("esim_control","false").equals("true"))throw new UserError("Управление адаптером выключено на телефоне");
         String stage=d.optString("stage");
-        if(!stage.equals("confirm_add")&&!stage.equals("confirm_enable")&&!stage.equals("confirm_delete"))return;
+        if(!stage.equals("confirm_add")&&!stage.equals("confirm_enable")&&!stage.equals("confirm_delete")&&!stage.equals("confirm_batch"))return;
+        if(stage.equals("confirm_batch")) {
+            JSONArray items=d.getJSONArray("items");StringBuilder missing=new StringBuilder();
+            for(int i=0;i<items.length();i++){JSONObject it=items.getJSONObject(i);if(needsPin(it.getString("code"))&&it.optString("pin").isEmpty())missing.append(i==0?"":", ").append(it.getString("number"));}
+            if(missing.length()>0)throw new UserError("Оператор требует код подтверждения для: "+missing+". Нажми «Добавить ещё», пришли /pin КОД после нужной eSIM или убери её.");
+        }
         if(stage.equals("confirm_add")) {
             String[] activation=d.getString("code").split("\\$",-1);
             if(activation.length>4 && activation[4].equals("1") && d.optString("pin").isEmpty())
@@ -506,6 +649,7 @@ final class Bot {
         show(t,m,"Проверяем выбранный профиль на адаптере… Статус операции доступен через /status.",null);
         JSONObject card=lpa.card(d.getString("eid"));if(!card.getString("eid").equals(d.optString("eid")))throw new UserError("Адаптер изменился. Начни операцию заново.");
         if(stage.equals("confirm_delete")){confirmDelete(t,m,d,card);return;}
+        if(stage.equals("confirm_batch")){installBatch(t,m,d,card);return;}
         if(stage.equals("confirm_enable")) {
             JSONObject p=findProfile(card,d.getString("iccid"));
             if(p.optBoolean("enabled")) {
