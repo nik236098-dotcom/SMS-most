@@ -50,26 +50,24 @@ public class BulkDeleteTest {
     JSONObject draft() throws Exception {return new JSONObject(settings.get("draft:"+CHAT));}
     String toggle(int i) throws Exception {return "bd:"+draft().getString("nonce")+":"+i;}
     String confirm() throws Exception {return "confirm:"+draft().getString("nonce");}
-    @Test public void onlyInactiveProfilesAreOfferedAndSelectedOnesAreDeletedInOrder() throws Exception {
+    @Test public void selectAllDeletesEveryProfileIncludingActiveInOrder() throws Exception {
         send("/bulkdelete",null);
-        verify(api).send(eq(CHAT),argThat(t->t.contains("+79990000002")&&t.contains("+79990000003")&&!t.contains("+79990000001")&&t.contains("Активные профили")),notNull());
-        assertEquals(2,draft().getJSONArray("entries").length());
+        verify(api).send(eq(CHAT),argThat(t->t.contains("🟢 +79990000001")&&t.contains("+79990000002")&&t.contains("+79990000003")),notNull());
+        assertEquals(3,draft().getJSONArray("entries").length());
         tap("bd:all");tap("bd:go");verify(adapter,never()).delete(anyString(),anyString(),anyBoolean());
         tap(confirm());
-        InOrder order=inOrder(adapter);order.verify(adapter).delete(EID,iccid(2),false);order.verify(adapter).delete(EID,iccid(3),false);
-        verify(adapter,never()).delete(EID,iccid(1),false);verify(adapter,never()).delete(anyString(),anyString(),eq(true));
-        assertFalse(numbers.containsKey(key(2)));assertFalse(numbers.containsKey(key(3)));assertEquals("+79990000001",numbers.get(key(1)));
-        verify(api).send(eq(CHAT),contains("Массовое удаление завершено: 2 из 2"),notNull());
+        InOrder order=inOrder(adapter);order.verify(adapter).delete(EID,iccid(1),true);order.verify(adapter).delete(EID,iccid(2),false);order.verify(adapter).delete(EID,iccid(3),false);
+        assertTrue(numbers.isEmpty());assertEquals(0,profiles.length());
+        verify(api).send(eq(CHAT),contains("Массовое удаление завершено: 3 из 3"),notNull());
         assertEquals(0,store.pendingDeletes().length());
     }
     @Test public void toggleSelectsOnlyChosenProfile() throws Exception {
-        send("/bulkdelete",null);tap(toggle(1));tap("bd:go");tap(confirm());
+        send("/bulkdelete",null);tap(toggle(2));tap("bd:go");tap(confirm());
         verify(adapter).delete(EID,iccid(3),false);verify(adapter,never()).delete(EID,iccid(2),false);
     }
-    @Test public void profileThatBecameActiveIsSkipped() throws Exception {
-        send("/bulkdelete",null);tap("bd:all");tap("bd:go");profiles.getJSONObject(1).put("enabled",true);tap(confirm());
-        verify(adapter,never()).delete(EID,iccid(2),false);verify(adapter).delete(EID,iccid(3),false);
-        verify(api).send(eq(CHAT),argThat(t->t.contains("1 из 2")&&t.contains("стал активным")),notNull());assertEquals("+79990000002",numbers.get(key(2)));
+    @Test public void profileThatBecameActiveIsStillDeletedWithDisable() throws Exception {
+        send("/bulkdelete",null);tap(toggle(1));tap("bd:go");profiles.getJSONObject(0).put("enabled",false);profiles.getJSONObject(1).put("enabled",true);tap(confirm());
+        verify(adapter).delete(EID,iccid(2),true);verify(adapter,never()).delete(eq(EID),eq(iccid(1)),anyBoolean());
     }
     @Test public void failedDeletionKeepsNumberAndJournalAndOthersContinue() throws Exception {
         doReturn(new JSONObject().put("success",false)).when(adapter).delete(EID,iccid(2),false);
@@ -81,8 +79,7 @@ public class BulkDeleteTest {
         send("/bulkdelete",null);tap("bd:all");tap("bd:go");String confirm=confirm();tap("cancel");tap(confirm);
         verify(adapter,never()).delete(anyString(),anyString(),anyBoolean());
     }
-    @Test public void onlyActiveProfileIsExplained() throws Exception {
-        profiles=new JSONArray().put(profiles.getJSONObject(0));send("/bulkdelete",null);
-        verify(api).send(eq(CHAT),contains("Неактивных профилей нет"),isNull());
+    @Test public void emptyAdapterIsExplained() throws Exception {
+        profiles=new JSONArray();send("/bulkdelete",null);verify(api).send(eq(CHAT),contains("нет профилей"),isNull());
     }
 }

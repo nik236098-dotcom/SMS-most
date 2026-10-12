@@ -639,14 +639,14 @@ final class Bot {
     static final int BULK_MAX=40;
     private void beginBulkDelete(Telegram t,JSONObject m) throws Exception {
         requireAdapterControl();if(needsRead()&&(onCard||tasks==null))readCards();
-        JSONArray entries=new JSONArray();int active=0;
+        JSONArray entries=new JSONArray();
         for(JSONObject c:snapCards()){if(c.optBoolean("unavailable"))continue;JSONArray ps=c.getJSONArray("profiles");
-            for(int i=0;i<ps.length();i++){JSONObject p=ps.getJSONObject(i);if(p.optBoolean("enabled")){active++;continue;}
-                if(entries.length()<BULK_MAX)entries.put(new JSONObject().put("eid",c.getString("eid")).put("slot",c.getInt("slot")).put("iccid",p.getString("iccid"))
+            for(int i=0;i<ps.length()&&entries.length()<BULK_MAX;i++){JSONObject p=ps.getJSONObject(i);
+                entries.put(new JSONObject().put("eid",c.getString("eid")).put("slot",c.getInt("slot")).put("iccid",p.getString("iccid")).put("active",p.optBoolean("enabled"))
                     .put("key",Rules.profileKey(c.getString("eid"),p.getString("iccid"))).put("label",shortName(profileLabel(c,p),40)).put("selected",false));}}
-        if(entries.length()==0)throw new UserError(active>0?"Неактивных профилей нет. Активный профиль удаляется только по одному: /esim → профиль → «Удалить».":"На адаптерах нет профилей.");
+        if(entries.length()==0)throw new UserError("На адаптерах нет профилей.");
         s.put(menuKey(),"{}");
-        JSONObject d=newDraft("bulk_delete").put("entries",entries).put("active",active).put("expires",System.currentTimeMillis()+30*60000L);
+        JSONObject d=newDraft("bulk_delete").put("entries",entries).put("expires",System.currentTimeMillis()+30*60000L);
         s.put(draftKey(),d.toString());bulkScreen(t,m,d);
     }
     private void bulkScreen(Telegram t,JSONObject m,JSONObject d) throws Exception {
@@ -654,11 +654,10 @@ final class Bot {
         StringBuilder text=new StringBuilder("🗑 Массовое удаление\nОтметь профили, которые нужно удалить с адаптеров.\n");
         for(int i=0;i<entries.length();i++){JSONObject e=entries.getJSONObject(i);boolean on=e.optBoolean("selected");if(on)selected++;
             if(e.getInt("slot")!=lastSlot){lastSlot=e.getInt("slot");text.append("\nСлот ").append(lastSlot+1).append(":\n");}
-            text.append(on?"☑ ":"☐ ").append(i+1).append(". ").append(e.getString("label")).append("\n");
+            text.append(on?"☑ ":"☐ ").append(i+1).append(". ").append(e.optBoolean("active")?"🟢 ":"").append(e.getString("label")).append("\n");
             pair.put(button((on?"☑ ":"☐ ")+(i+1)+". "+shortName(e.getString("label"),22),"bd:"+d.getString("nonce")+":"+i));
             if(pair.length()==2){rows.put(pair);pair=new JSONArray();}}
         if(pair.length()>0)rows.put(pair);
-        if(d.optInt("active")>0)text.append("\nАктивные профили (🟢) здесь не показаны: их удаляют только по одному.");
         text.append("\nВыбрано: ").append(selected);
         rows.put(new JSONArray().put(button("Выбрать все","bd:all")).put(button("Снять выбор","bd:none")));
         if(selected>0)rows.put(new JSONArray().put(button("🗑 Удалить выбранные ("+selected+")","bd:go")));
@@ -676,8 +675,8 @@ final class Bot {
             if(chosen.length()==0)throw new UserError("Ничего не выбрано");
             d.put("stage","confirm_bulk_delete");s.put(draftKey(),d.toString());
             StringBuilder text=new StringBuilder("🗑 Удалить "+chosen.length()+" профилей с адаптеров?\n");
-            for(int i=0;i<chosen.length();i++){JSONObject e=chosen.getJSONObject(i);text.append("\n").append(i+1).append(". Слот ").append(e.getInt("slot")+1).append(" · ").append(e.getString("label"));}
-            text.append("\n\nПрофили будут удалены с карт по очереди. Старые QR-коды могут не подойти для повторной установки — это зависит от оператора. Активные профили не затрагиваются.");
+            for(int i=0;i<chosen.length();i++){JSONObject e=chosen.getJSONObject(i);text.append("\n").append(i+1).append(". Слот ").append(e.getInt("slot")+1).append(" · ").append(e.optBoolean("active")?"🟢 ":"").append(e.getString("label"));}
+            text.append("\n\nПрофили будут удалены с карт по очереди; активные (🟢) перед удалением отключатся. Старые QR-коды могут не подойти для повторной установки — это зависит от оператора.");
             JSONArray rows=new JSONArray();
             rows.put(new JSONArray().put(button("🗑 Удалить "+chosen.length(),"confirm:"+d.getString("nonce"))));
             rows.put(new JSONArray().put(button("← Изменить выбор","bd:back")).put(button("Отмена","cancel")));
@@ -690,7 +689,7 @@ final class Bot {
         }
         d.put("stage","bulk_delete");s.put(draftKey(),d.toString());bulkScreen(t,m,d);
     }
-    /** Card thread. Each deletion is journaled like a single one; an active profile is never deleted here. */
+    /** Card thread. Each deletion is journaled like a single one; selected active profiles are disabled first. */
     private void bulkDelete(Telegram t,JSONObject m,JSONObject d) throws Exception {
         JSONArray entries=d.getJSONArray("entries"),chosen=new JSONArray();String nonce=d.getString("nonce");
         for(int i=0;i<entries.length();i++)if(entries.getJSONObject(i).optBoolean("selected"))chosen.put(entries.getJSONObject(i));
@@ -707,11 +706,12 @@ final class Bot {
                 try{hold=awake.hold(5*60000L);}catch(RuntimeException ignored){}
                 JSONObject card=cards.get(eid);
                 if(card==null){card=lpa.card(eid);if(!card.getString("eid").equals(eid))throw new UserError("Адаптер изменился");cards.put(eid,card);}
-                JSONObject p=findProfile(card,iccid);
-                if(p.optBoolean("enabled"))throw new UserError("профиль стал активным — не удалён");
+                // The user selected it for deletion: an active profile is disabled and deleted too.
+                boolean active=findProfile(card,iccid).optBoolean("enabled");
+                if(active){s.switching(card.getInt("slot"),true);s.clearActive(card.getInt("slot"));}
                 s.rememberDelete(new JSONObject().put("nonce",item).put("eid",eid).put("iccid",iccid).put("key",e.getString("key"))
                     .put("epoch",s.epoch()).put("chat_id",replyTo()));
-                JSONObject result=lpa.delete(eid,iccid,false);
+                JSONObject result=lpa.delete(eid,iccid,active);
                 if(result==null||!result.optBoolean("success"))throw new UserError("удаление не подтверждено");
                 s.forgetNumber(e.getString("key"));s.finishDelete(item);ok++;
                 line="✅ "+(i+1)+"/"+n+" удалён: "+e.getString("label");
