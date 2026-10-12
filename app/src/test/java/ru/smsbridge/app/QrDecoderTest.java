@@ -112,4 +112,32 @@ public class QrDecoderTest {
         assertArrayEquals(new int[]{1},QrDecoder.factors(500,500));
         assertArrayEquals(new int[]{2,7,8},QrDecoder.enlargements(114));
     }
+    /** Operator-styled QR on a card: rounded finder squares, a logo in the middle, smooth edges. */
+    static int[] styled(double module,int[] size) throws Exception {
+        EnumMap<EncodeHintType,Object> hints=new EnumMap<>(EncodeHintType.class);hints.put(EncodeHintType.MARGIN,0);
+        hints.put(EncodeHintType.ERROR_CORRECTION,com.google.zxing.qrcode.decoder.ErrorCorrectionLevel.H);
+        BitMatrix m=new QRCodeWriter().encode(CODE,BarcodeFormat.QR_CODE,1,1,hints);int n=m.getWidth();
+        int qr=(int)Math.round(n*module),pad=(int)(qr*0.9);int w=qr+2*pad,h=qr+pad*3/2;size[0]=w;size[1]=h;int[] out=new int[w*h];
+        for(int y=0;y<h;y++)for(int x=0;x<w;x++){int dark=0;
+            for(int sy=0;sy<3;sy++)for(int sx=0;sx<3;sx++)if(styledDark(m,n,(x-pad+(sx+.5)/3)/module,(y-pad/2+(sy+.5)/3)/module))dark++;
+            int v=250-dark*220/9;out[y*w+x]=0xFF000000|(v<<16)|(v<<8)|v;}
+        return out;
+    }
+    private static boolean round(double x,double y,double x0,double y0,double s,double r) {
+        if(x<x0||y<y0||x>=x0+s||y>=y0+s)return false;
+        double cx=Math.max(x0+r,Math.min(x0+s-r,x)),cy=Math.max(y0+r,Math.min(y0+s-r,y));return (x-cx)*(x-cx)+(y-cy)*(y-cy)<=r*r;
+    }
+    private static boolean styledDark(BitMatrix m,int n,double fx,double fy) {
+        if(fx<0||fy<0||fx>=n||fy>=n)return false;
+        for(double[] f:new double[][]{{0,0},{n-7,0},{0,n-7}}){double x0=f[0],y0=f[1];
+            if(fx>=x0&&fx<x0+7&&fy>=y0&&fy<y0+7)return round(fx,fy,x0,y0,7,2)&&!round(fx,fy,x0+1,y0+1,5,1.5)||round(fx,fy,x0+2,y0+2,3,1);}
+        double c=n/2.0;
+        if(Math.abs(fx-c)<3.5&&Math.abs(fy-c)<3.5)return round(fx,fy,c-3.5,c-3.5,7,1.5)&&!round(fx,fy,c-2.5,c-2.5,5,1)||round(fx,fy,c-1.5,c-1.5,3,.5);
+        return m.get((int)fx,(int)fy);
+    }
+    @Test public void styledOperatorCodesWithRoundedFindersAreRead() throws Exception {
+        // v0.20.0 failed at 4.25, 5.25, 6.25 and 7.25 px modules, v0.21.0 at 4.25 px (as on a real operator card).
+        for(double module=3.5;module<=8.01;module+=0.25){int[] size=new int[2];int[] pixels=styled(module,size);
+            assertEquals("module "+module,CODE,QrDecoder.decode(size[0],size[1],pixels));}
+    }
 }

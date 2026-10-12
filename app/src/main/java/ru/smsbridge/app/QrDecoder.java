@@ -39,6 +39,13 @@ final class QrDecoder {
             if(edge<500)for(int k:enlargements(edge)) {
                 String text=attempts(width*k,height*k,enlarge(gray,width,height,k));if(text!=null)return text;
             }
+            // Styled codes (rounded finder squares, a logo in the middle) are found by ZXing only at
+            // some module sizes. A few fractional, smoothed scales cover those; output stays small.
+            for(float scale:SCALES) {
+                int w=Math.round(width*scale),h=Math.round(height*scale);
+                if(Math.min(w,h)<42||Math.max(w,h)>1300)continue;
+                String text=attempts(w,h,resample(gray,width,height,w,h));if(text!=null)return text;
+            }
         }
         throw new UserError("Не удалось прочитать QR-код. Обрезанные изображения поддерживаются. Проверь, что все квадраты кода целиком видны; можно отправить оригинал как файл или строку LPA:1$…");
     }
@@ -53,6 +60,27 @@ final class QrDecoder {
         java.util.LinkedHashSet<Integer> out=new java.util.LinkedHashSet<>();
         for(int target:new int[]{0,700,900}){int k=target==0?2:(target+edge-1)/edge;if(k>=2&&k<=8)out.add(k);}
         int[] list=new int[out.size()];int i=0;for(int k:out)list[i++]=k;return list;
+    }
+    static final float[] SCALES={0.6f,0.75f,0.5f,1.5f,1.25f,2f};
+    /** Area average when reducing, bilinear when enlarging. */
+    static byte[] resample(byte[] gray,int width,int height,int w,int h) {
+        byte[] out=new byte[w*h];float sx=width/(float)w,sy=height/(float)h;
+        if(sx>1||sy>1) {
+            for(int y=0;y<h;y++){int y0=(int)(y*sy),y1=Math.max(y0+1,Math.min(height,(int)((y+1)*sy)));
+                for(int x=0;x<w;x++){int x0=(int)(x*sx),x1=Math.max(x0+1,Math.min(width,(int)((x+1)*sx)));int sum=0;
+                    for(int yy=y0;yy<y1;yy++){int row=yy*width;for(int xx=x0;xx<x1;xx++)sum+=gray[row+xx]&255;}
+                    out[y*w+x]=(byte)(sum/((y1-y0)*(x1-x0)));}}
+            return out;
+        }
+        for(int y=0;y<h;y++) {
+            float fy=Math.max(0,Math.min(height-1,(y+.5f)*sy-.5f));int y0=(int)fy,y1=Math.min(height-1,y0+1);float ay=fy-y0;
+            for(int x=0;x<w;x++) {
+                float fx=Math.max(0,Math.min(width-1,(x+.5f)*sx-.5f));int x0=(int)fx,x1=Math.min(width-1,x0+1);float ax=fx-x0;
+                float top=(gray[y0*width+x0]&255)*(1-ax)+(gray[y0*width+x1]&255)*ax,bottom=(gray[y1*width+x0]&255)*(1-ax)+(gray[y1*width+x1]&255)*ax;
+                out[y*w+x]=(byte)Math.round(top*(1-ay)+bottom*ay);
+            }
+        }
+        return out;
     }
     private static byte[] shrink(byte[] gray,int width,int height,int f) {
         int w=width/f,h=height/f,area=f*f;byte[] out=new byte[w*h];
