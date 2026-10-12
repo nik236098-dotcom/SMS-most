@@ -122,12 +122,14 @@ final class Bot {
             if(command.equals("add"))return snapshotEmpty()?Route.CARD:Route.NOW;
             if(command.startsWith("add:"))return snapCard(command.substring(4))==null?Route.CARD:Route.NOW;
             if(command.equals("batch"))return snapshotEmpty()?Route.CARD:Route.NOW;
+            if(command.equals("bulkdel"))return listRoute();
             if(command.equals("batch:done")||command.equals("batch:undo")||command.equals("batch:more"))return Route.NOW;
             if(command.startsWith("batch:"))return snapCard(command.substring(6))==null?Route.CARD:Route.NOW;
             return Route.NOW;
         }
         if(command.equals("/esim")||command.equals("/9esim"))return listRoute();
         if(command.equals("/add")||command.equals("/batch"))return snapshotEmpty()?Route.CARD:Route.NOW;
+        if(command.equals("/bulkdelete"))return listRoute();
         if(command.startsWith("/"))return Route.NOW;
         String stage=draft().optString("stage");
         if((stage.equals("qr")||stage.equals("confirm_add")||stage.equals("batch_phone")||stage.equals("batch_qr"))&&hasImage(m))return Route.MEDIA;
@@ -205,6 +207,8 @@ final class Bot {
             if(data.startsWith("physical:")){physicalNumber(t,m,Integer.parseInt(data.substring(9)));return;}
             if(data.equals("add")){beginAdd(t,m);return;}
             if(data.equals("batch")){beginBatch(t,m);return;}
+            if(data.equals("bulkdel")){beginBulkDelete(t,m);return;}
+            if(data.startsWith("bd:")){bulkAction(t,m,data.substring(3));return;}
             if(data.equals("batch:done")||data.equals("batch:undo")||data.equals("batch:more")){batchAction(t,m,data.substring(6));return;}
             if(data.startsWith("batch:")){beginBatch(t,m,data.substring(6));return;}
             if(data.startsWith("add:")){beginAdd(t,m,data.substring(4));return;}
@@ -226,6 +230,7 @@ final class Bot {
         if(text.equals("/esim")||text.equals("/9esim")){s.put(draftKey(),"{}");adapterProfiles(t,null);return;}
         if(text.equals("/add")){beginAdd(t,null);return;}
         if(text.equals("/batch")){beginBatch(t,null);return;}
+        if(text.equals("/bulkdelete")){beginBulkDelete(t,null);return;}
         JSONObject d=draft();String stage=d.optString("stage");
         if(stage.equals("batch_phone")||stage.equals("batch_qr")){batchInput(t,m,d,text);return;}
         if(stage.equals("phone")) {
@@ -568,7 +573,8 @@ final class Bot {
         }
         text.append("\nНажми на профиль: переключить, задать номер или удалить. На каждом адаптере активен свой профиль.");
         rows.put(new JSONArray().put(button("➕ Добавить eSIM","add")).put(button("📦 Массовая загрузка","batch")));
-        rows.put(new JSONArray().put(button("🔄 Обновить","esim:refresh:"+page)).put(button("Главное меню","menu")));
+        rows.put(new JSONArray().put(button("🗑 Массовое удаление","bulkdel")).put(button("🔄 Обновить","esim:refresh:"+page)));
+        rows.put(new JSONArray().put(button("Главное меню","menu")));
         show(t,m,text.toString(),new JSONObject().put("inline_keyboard",rows));
     }
     private void select(Telegram t,JSONObject m,String data) throws Exception {
@@ -629,11 +635,103 @@ final class Bot {
             s.finishDelete(d.getString("nonce"));
         } finally {if(!verified)s.put("error","eSIM: удаление не подтверждено; проверь /esim");}
     }
+    // ---- Bulk deletion: tick inactive profiles of both adapters, confirm, delete one by one. ----
+    static final int BULK_MAX=40;
+    private void beginBulkDelete(Telegram t,JSONObject m) throws Exception {
+        requireAdapterControl();if(needsRead()&&(onCard||tasks==null))readCards();
+        JSONArray entries=new JSONArray();int active=0;
+        for(JSONObject c:snapCards()){if(c.optBoolean("unavailable"))continue;JSONArray ps=c.getJSONArray("profiles");
+            for(int i=0;i<ps.length();i++){JSONObject p=ps.getJSONObject(i);if(p.optBoolean("enabled")){active++;continue;}
+                if(entries.length()<BULK_MAX)entries.put(new JSONObject().put("eid",c.getString("eid")).put("slot",c.getInt("slot")).put("iccid",p.getString("iccid"))
+                    .put("key",Rules.profileKey(c.getString("eid"),p.getString("iccid"))).put("label",shortName(profileLabel(c,p),40)).put("selected",false));}}
+        if(entries.length()==0)throw new UserError(active>0?"Неактивных профилей нет. Активный профиль удаляется только по одному: /esim → профиль → «Удалить».":"На адаптерах нет профилей.");
+        s.put(menuKey(),"{}");
+        JSONObject d=newDraft("bulk_delete").put("entries",entries).put("active",active).put("expires",System.currentTimeMillis()+30*60000L);
+        s.put(draftKey(),d.toString());bulkScreen(t,m,d);
+    }
+    private void bulkScreen(Telegram t,JSONObject m,JSONObject d) throws Exception {
+        JSONArray entries=d.getJSONArray("entries"),rows=new JSONArray(),pair=new JSONArray();int selected=0,lastSlot=-1;
+        StringBuilder text=new StringBuilder("🗑 Массовое удаление\nОтметь профили, которые нужно удалить с адаптеров.\n");
+        for(int i=0;i<entries.length();i++){JSONObject e=entries.getJSONObject(i);boolean on=e.optBoolean("selected");if(on)selected++;
+            if(e.getInt("slot")!=lastSlot){lastSlot=e.getInt("slot");text.append("\nСлот ").append(lastSlot+1).append(":\n");}
+            text.append(on?"☑ ":"☐ ").append(i+1).append(". ").append(e.getString("label")).append("\n");
+            pair.put(button((on?"☑ ":"☐ ")+(i+1)+". "+shortName(e.getString("label"),22),"bd:"+d.getString("nonce")+":"+i));
+            if(pair.length()==2){rows.put(pair);pair=new JSONArray();}}
+        if(pair.length()>0)rows.put(pair);
+        if(d.optInt("active")>0)text.append("\nАктивные профили (🟢) здесь не показаны: их удаляют только по одному.");
+        text.append("\nВыбрано: ").append(selected);
+        rows.put(new JSONArray().put(button("Выбрать все","bd:all")).put(button("Снять выбор","bd:none")));
+        if(selected>0)rows.put(new JSONArray().put(button("🗑 Удалить выбранные ("+selected+")","bd:go")));
+        rows.put(new JSONArray().put(button("Отмена","cancel")));
+        show(t,m,text.toString(),new JSONObject().put("inline_keyboard",rows));
+    }
+    private void bulkAction(Telegram t,JSONObject m,String action) throws Exception {
+        requireAdapterControl();JSONObject d=draft();String stage=d.optString("stage");
+        if(!stage.equals("bulk_delete")&&!stage.equals("confirm_bulk_delete"))throw new UserError("Выбор устарел. Открой массовое удаление заново: /bulkdelete");
+        JSONArray entries=d.getJSONArray("entries");
+        if(action.equals("all")||action.equals("none")){for(int i=0;i<entries.length();i++)entries.getJSONObject(i).put("selected",action.equals("all"));}
+        else if(action.equals("back")){}
+        else if(action.equals("go")) {
+            JSONArray chosen=new JSONArray();for(int i=0;i<entries.length();i++)if(entries.getJSONObject(i).optBoolean("selected"))chosen.put(entries.getJSONObject(i));
+            if(chosen.length()==0)throw new UserError("Ничего не выбрано");
+            d.put("stage","confirm_bulk_delete");s.put(draftKey(),d.toString());
+            StringBuilder text=new StringBuilder("🗑 Удалить "+chosen.length()+" профилей с адаптеров?\n");
+            for(int i=0;i<chosen.length();i++){JSONObject e=chosen.getJSONObject(i);text.append("\n").append(i+1).append(". Слот ").append(e.getInt("slot")+1).append(" · ").append(e.getString("label"));}
+            text.append("\n\nПрофили будут удалены с карт по очереди. Старые QR-коды могут не подойти для повторной установки — это зависит от оператора. Активные профили не затрагиваются.");
+            JSONArray rows=new JSONArray();
+            rows.put(new JSONArray().put(button("🗑 Удалить "+chosen.length(),"confirm:"+d.getString("nonce"))));
+            rows.put(new JSONArray().put(button("← Изменить выбор","bd:back")).put(button("Отмена","cancel")));
+            show(t,m,text.toString(),new JSONObject().put("inline_keyboard",rows));return;
+        } else {
+            String[] parts=action.split(":");
+            if(parts.length!=2||!parts[0].equals(d.getString("nonce")))throw new UserError("Выбор устарел. Открой массовое удаление заново: /bulkdelete");
+            int i=Integer.parseInt(parts[1]);if(i<0||i>=entries.length())return;
+            JSONObject e=entries.getJSONObject(i);e.put("selected",!e.optBoolean("selected"));
+        }
+        d.put("stage","bulk_delete");s.put(draftKey(),d.toString());bulkScreen(t,m,d);
+    }
+    /** Card thread. Each deletion is journaled like a single one; an active profile is never deleted here. */
+    private void bulkDelete(Telegram t,JSONObject m,JSONObject d) throws Exception {
+        JSONArray entries=d.getJSONArray("entries"),chosen=new JSONArray();String nonce=d.getString("nonce");
+        for(int i=0;i<entries.length();i++)if(entries.getJSONObject(i).optBoolean("selected"))chosen.put(entries.getJSONObject(i));
+        s.put(draftKey(),"{}");s.put(menuKey(),"{}");
+        int n=chosen.length(),ok=0;StringBuilder report=new StringBuilder();java.util.Map<String,JSONObject> cards=new java.util.HashMap<>();
+        show(t,m,"🗑 Удаляю "+n+" профилей по очереди. После каждого придёт отчёт. Ход: /status",null);
+        for(int i=0;i<n;i++) {
+            if(!s.running())break;
+            JSONObject e=chosen.getJSONObject(i);String eid=e.getString("eid"),iccid=e.getString("iccid"),line,item=nonce+":"+i;
+            s.put("esim_task_label","Массовое удаление eSIM: "+(i+1)+" из "+n);
+            try{s.snapshotDirty(eid);}catch(Exception ignored){}
+            AutoCloseable hold=null;
+            try {
+                try{hold=awake.hold(5*60000L);}catch(RuntimeException ignored){}
+                JSONObject card=cards.get(eid);
+                if(card==null){card=lpa.card(eid);if(!card.getString("eid").equals(eid))throw new UserError("Адаптер изменился");cards.put(eid,card);}
+                JSONObject p=findProfile(card,iccid);
+                if(p.optBoolean("enabled"))throw new UserError("профиль стал активным — не удалён");
+                s.rememberDelete(new JSONObject().put("nonce",item).put("eid",eid).put("iccid",iccid).put("key",e.getString("key"))
+                    .put("epoch",s.epoch()).put("chat_id",replyTo()));
+                JSONObject result=lpa.delete(eid,iccid,false);
+                if(result==null||!result.optBoolean("success"))throw new UserError("удаление не подтверждено");
+                s.forgetNumber(e.getString("key"));s.finishDelete(item);ok++;
+                line="✅ "+(i+1)+"/"+n+" удалён: "+e.getString("label");
+            } catch(Exception x) {
+                line="⚠️ "+(i+1)+"/"+n+" "+e.getString("label")+": "+Telegram.safe(x);
+            } finally {if(hold!=null)try{hold.close();}catch(Exception ignored){}}
+            report.append(line).append("\n");
+            try{s.enqueueNotice("bulk-delete:"+s.epoch()+":"+item,replyTo(),line);}catch(Exception ignored){}
+        }
+        for(JSONObject card:cards.values())try{lpa.refresh(s,card);}catch(Exception ignored){/* Re-read on the next /esim. */}
+        String result="🗑 Массовое удаление завершено: "+ok+" из "+n+"\n\n"+report+"\nСписок профилей: /esim";
+        s.put("esim_last_result",result);
+        send(t,replyTo(),result,keyboard(button("Профили 9eSIM","adapter")));
+    }
     private void confirm(Telegram t,JSONObject m,String nonce) throws Exception {
         JSONObject d=draft();if(!d.optString("nonce").equals(nonce))throw new UserError("Подтверждение устарело. Начни операцию заново.");
         if(!s.get("esim_control","false").equals("true"))throw new UserError("Управление адаптером выключено на телефоне");
         String stage=d.optString("stage");
-        if(!stage.equals("confirm_add")&&!stage.equals("confirm_enable")&&!stage.equals("confirm_delete")&&!stage.equals("confirm_batch"))return;
+        if(!stage.equals("confirm_add")&&!stage.equals("confirm_enable")&&!stage.equals("confirm_delete")&&!stage.equals("confirm_batch")&&!stage.equals("confirm_bulk_delete"))return;
+        if(stage.equals("confirm_bulk_delete")){bulkDelete(t,m,d);return;}
         if(stage.equals("confirm_batch")) {
             JSONArray items=d.getJSONArray("items");StringBuilder missing=new StringBuilder();
             for(int i=0;i<items.length();i++){JSONObject it=items.getJSONObject(i);if(needsPin(it.getString("code"))&&it.optString("pin").isEmpty())missing.append(i==0?"":", ").append(it.getString("number"));}
