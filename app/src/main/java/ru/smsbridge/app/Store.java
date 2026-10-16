@@ -98,7 +98,8 @@ final class Store extends SQLiteOpenHelper {
         java.util.List<Long> checked=Rules.telegramIds(Rules.joinIds(recipients));
         long recipient=checked.isEmpty()?0:checked.get(0);
         if (!get("token", "").equals(token) || !chats().equals(checked)) {
-            if(AdapterTasks.shared().busy())throw new IllegalStateException("Дождись завершения операции 9eSIM перед изменением получателей или бота");
+            // A background card check is not a reason to refuse; only a real user operation is.
+            if(AdapterTasks.shared().userBusy())throw new IllegalStateException("Дождись завершения операции 9eSIM перед изменением получателей или бота");
             if (running() || enabled()) throw new IllegalStateException("Сначала останови бота");
             if (pending() > 0) throw new IllegalStateException("Сначала отправь или удали очередь прежнего бота");
             if(!get("token", "").equals(token))db.delete("delivery_wait",null,null);

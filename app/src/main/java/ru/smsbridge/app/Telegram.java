@@ -53,6 +53,7 @@ final class Telegram {
         this.token=token;this.http=http;this.endpoint=endpoint;
     }
     boolean closed(){return closed;}
+    boolean uses(String other){return token.equals(other);}
     void close(){closed=true;for(Call call:active.keySet())call.cancel();}
     void reconnectPolling(){for(java.util.Map.Entry<Call,String> e:active.entrySet())if(e.getValue().equals("getUpdates"))e.getKey().cancel();http.connectionPool().evictAll();}
     private byte[] request(String path,String method,JSONObject payload,int max) throws Exception {

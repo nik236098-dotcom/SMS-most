@@ -25,7 +25,7 @@ import java.util.concurrent.TimeUnit;
 
 public final class RelayService extends Service {
     private ScheduledExecutorService supervisor;private RecoveringTask sender,poller,adapter;
-    private volatile boolean stopped;private Telegram pollingApi;private Bot worker;
+    private volatile boolean stopped;private volatile Telegram pollingApi;private Bot worker;
     private volatile long nextPoll;private int pollFailures;private volatile boolean reconnecting;
     private ConnectivityManager.NetworkCallback networkCallback;private volatile boolean networkReady;private volatile Network defaultNetwork;
     private SubscriptionManager.OnSubscriptionsChangedListener simListener;
@@ -121,6 +121,9 @@ public final class RelayService extends Service {
         long now=System.currentTimeMillis();
         if(now-loopSeen>5000){loopSeen=now;s.put("bot_loop_seen",""+now);}
         if(System.nanoTime()<nextPoll)return;
+        // The bot token was changed in the app while this service kept running: poll the new bot.
+        String token=s.get("token","");
+        if(pollingApi==null||!pollingApi.uses(token)){if(pollingApi!=null)pollingApi.close();pollingApi=new Telegram(token);}
         android.os.PowerManager.WakeLock lock=null;
         try {
             lock=getSystemService(android.os.PowerManager.class).newWakeLock(android.os.PowerManager.PARTIAL_WAKE_LOCK,"smsbridge:commands");lock.acquire(120000);

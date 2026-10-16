@@ -39,6 +39,8 @@ public final class MainActivity extends Activity {
     private Store s;private LinearLayout root;private final ExecutorService worker=Executors.newSingleThreadExecutor();
     private final Handler handler=new Handler(Looper.getMainLooper());private boolean alive=true,homeVisible;
     private TextView status,stats,connection,error,smsDiagnostics;
+    // Typed but not yet applied token/IDs survive a screen rebuild (stop, failed launch).
+    private String draftToken,draftIds;
     private Button relayToggle; private TextView setupLabel; private EditText tokenInput,idInput; private boolean launching;
     private final Runnable ticker=new Runnable(){public void run(){if(alive){if(homeVisible)refresh();handler.postDelayed(this,3000);}}};
     @Override public void onCreate(Bundle b){super.onCreate(b);s=BridgeApp.store();
@@ -72,11 +74,12 @@ public final class MainActivity extends Activity {
     }
     private void home() {
         page("SMS Мост","Бот работает с этого телефона · сервер не нужен");homeVisible=true;
-        tokenInput=input("Вставь токен из @BotFather",true);tokenInput.setText(s.get("token",""));
+        tokenInput=input("Вставь токен из @BotFather",true);tokenInput.setText(draftToken!=null?draftToken:s.get("token",""));
         idInput=input("Telegram ID: 123456789, 987654321",false);idInput.setSingleLine(false);idInput.setMaxLines(3);
-        if(s.chat()>0)idInput.setText(Rules.joinIds(s.chats()));
+        if(draftIds!=null)idInput.setText(draftIds);else if(s.chat()>0)idInput.setText(Rules.joinIds(s.chats()));
+        draftToken=null;draftIds=null;
         label(root,"Укажи ID получателей через запятую, до 10 аккаунтов. Бот отвечает только им и отправляет SMS каждому. Каждый получатель должен написать боту /start. Telegram на Android открывать не нужно. Если ID неизвестен, оставь поле пустым — подключение одного получателя по коду.",14,false);
-        relayToggle=button(root,s.running()?"Остановить бота":"Запустить бота",true,()->{if(s.running())stop();else launch();});
+        relayToggle=button(root,s.running()?"Остановить бота":"Запустить бота",true,()->{if(!s.running())launch();else if(inputsChanged())apply();else stop();});
         if(s.running()&&!RelayService.batteryUnrestricted(this)) {
             TextView warning=label(root,"⚠️ Для SMS Моста включена оптимизация батареи. Android 12+ тогда может остановить бота в фоне и не дать ему перезапуститься: бот перестанет отвечать до нового SMS или открытия приложения.",14,false);
             warning.setTextColor(Color.rgb(255,196,105));
@@ -105,7 +108,7 @@ public final class MainActivity extends Activity {
     }
     private void refresh(){
         boolean running=s.running();status.setText(BotHealth.summary(s));
-        relayToggle.setText(launching?"Проверяем Telegram…":running?"Остановить бота":"Запустить бота");relayToggle.setEnabled(!launching);
+        relayToggle.setText(launching?"Проверяем Telegram…":running?(inputsChanged()?"Применить и перезапустить бота":"Остановить бота"):"Запустить бота");relayToggle.setEnabled(!launching);
         String username=s.get("bot_username","");
         connection.setText((username.isEmpty()?"Токен ещё не проверен":"Бот: @"+username)+"\n"+(s.chat()>0?"Получатель: "+s.get("chat_name",""):"Получатель пока не подключён"));
         setupLabel.setText(running&&s.chat()==0?"Код подключения: "+s.setupCode()+"\nОтправь эти 8 цифр боту со своего Telegram. Код действует 30 минут.":"");
@@ -115,17 +118,38 @@ public final class MainActivity extends Activity {
         smsDiagnostics.setText(SmsDiagnostics.report(s)+"\n\n"+CallDiagnostics.report(s)+"\n\n"+Bot.adapterStatus(s));
         error.setText(s.get("bot_error","")+ (s.get("bot_error","").isEmpty()?"":"\n")+s.get("error",""));
     }
-    private void launch() {
-        if(launching)return;String token=tokenInput.getText().toString().trim();launching=true;refresh();
+    /** The token or recipient IDs on screen differ from the saved ones. */
+    private boolean inputsChanged() {
+        if(tokenInput==null||idInput==null)return false;
+        if(!tokenInput.getText().toString().trim().equals(s.get("token","")))return true;
+        try{return !Rules.telegramIds(idInput.getText().toString().trim()).equals(s.chats());}catch(Exception e){return true;}
+    }
+    private void keepDrafts(){if(tokenInput!=null)draftToken=tokenInput.getText().toString();if(idInput!=null)draftIds=idInput.getText().toString();}
+    /** Running bot, new token/IDs on screen: stop, save the new values, start again. */
+    private void apply() {
+        confirmQueue(()->{s.put("enabled","false");s.put("bot_enabled","false");s.resetCalls();stopService(new Intent(this,RelayService.class));launchConfirmed();});
+    }
+    /** Messages still queued for the previous bot/recipients cannot be redirected: offer to drop them. */
+    private void confirmQueue(Runnable next) {
+        int queued=s.pending();
+        if(queued==0||!inputsChanged()){next.run();return;}
+        new AlertDialog.Builder(this).setTitle("Сменить бота или получателей?")
+            .setMessage("В очереди "+queued+" неотправленных сообщений для прежнего бота или получателей. Перенаправить их нельзя: они будут удалены.")
+            .setNegativeButton("Отмена",null).setPositiveButton("Удалить и сменить",(d,w)->{s.purgeQueue();next.run();}).show();
+    }
+    private void launch(){confirmQueue(()->launchConfirmed());}
+    private void launchConfirmed() {
+        if(launching)return;String token=tokenInput.getText().toString().trim();
         String idText=idInput.getText().toString().trim();final java.util.List<Long> recipients;
-        try{recipients=Rules.telegramIds(idText);}catch(Exception e){launching=false;s.put("bot_error",Telegram.safe(e));refresh();return;}
+        try{recipients=Rules.telegramIds(idText);}catch(Exception e){s.put("bot_error",Telegram.safe(e));toast(Telegram.safe(e));refresh();return;}
+        launching=true;keepDrafts();refresh();
         worker.submit(()->{
             try {
                 Telegram t=new Telegram(token);JSONObject wh=t.call("getWebhookInfo",new JSONObject()).getJSONObject("result");
                 if(!wh.optString("url").isEmpty())throw new UserError("Этот бот подключён к другому серверу. Используй отдельного бота из @BotFather.");
                 String username=t.call("getMe",new JSONObject()).getJSONObject("result").getString("username");
                 s.configureBot(token,username,recipients);s.put("bot_error","");s.put("bot_last_seen","0");
-                handler.post(()->{launching=false;if(alive)permissions();});
+                handler.post(()->{launching=false;draftToken=null;draftIds=null;if(alive)permissions();});
             } catch(Exception e) {s.put("bot_error",Telegram.safe(e));handler.post(()->{launching=false;if(alive){refresh();toast(Telegram.safe(e));}});}
         });
     }
@@ -141,7 +165,7 @@ public final class MainActivity extends Activity {
         s.put("bot_enabled","true");s.put("enabled",""+(checkSelfPermission(Manifest.permission.RECEIVE_SMS)==PackageManager.PERMISSION_GRANTED));
         RelayService.start(this);home();
     }catch(Exception e){s.put("enabled","false");s.put("bot_enabled","false");s.put("bot_error","Android не разрешил запуск: проверь уведомления и настройки батареи.");home();}}
-    private void stop(){s.put("enabled","false");s.put("bot_enabled","false");s.resetCalls();stopService(new Intent(this,RelayService.class));home();}
+    private void stop(){keepDrafts();s.put("enabled","false");s.put("bot_enabled","false");s.resetCalls();stopService(new Intent(this,RelayService.class));home();}
     private void history() {
         page("SMS и входящие звонки","Номер SIM закрепляется в момент получения события");
         label(card(),SmsDiagnostics.report(s),14,false);
