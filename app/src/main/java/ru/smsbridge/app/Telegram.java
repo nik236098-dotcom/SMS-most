@@ -92,10 +92,10 @@ final class Telegram {
     }
     byte[] file(String fileId) throws Exception {
         JSONObject f=call("getFile",new JSONObject().put("file_id",fileId)).getJSONObject("result");
-        if(f.optLong("file_size")>2*1024*1024) throw new IllegalArgumentException("Пришли QR-код картинкой размером до 2 МБ");
+        if(f.optLong("file_size")>12*1024*1024) throw new IllegalArgumentException("Пришли QR-код картинкой или файлом до 12 МБ");
         String path=f.getString("file_path");
         if(!path.matches("[A-Za-z0-9_/.-]+")||path.contains("..")) throw new IllegalArgumentException("Неверный путь изображения");
-        return request("file/bot"+token+"/"+path,"file",null,2*1024*1024);
+        return request("file/bot"+token+"/"+path,"file",null,12*1024*1024);
     }
     static byte[] read(InputStream in,int max) throws Exception {
         try(InputStream stream=in; ByteArrayOutputStream out=new ByteArrayOutputStream()) {
